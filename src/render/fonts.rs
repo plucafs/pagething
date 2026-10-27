@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId};
 
+const GELASIO: &str = "gelasio";
+const GELASIO_BOLD: &str = "gelasio-bold";
 const DEJAVU: &str = "dejavu";
 const DEJAVU_BOLD: &str = "dejavu-bold";
 pub const BOLD_FAMILY: &str = "pagething-bold";
@@ -10,15 +12,15 @@ pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
     fonts.font_data.insert(
-        DEJAVU.to_owned(),
+        GELASIO.to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../../assets/fonts/DejaVuSans.ttf"
+            "../../assets/fonts/Gelasio-Regular.ttf"
         ))),
     );
     fonts.font_data.insert(
-        DEJAVU_BOLD.to_owned(),
+        GELASIO_BOLD.to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../../assets/fonts/DejaVuSans-Bold.ttf"
+            "../../assets/fonts/Gelasio-Bold.ttf"
         ))),
     );
 
@@ -28,13 +30,13 @@ pub fn install(ctx: &egui::Context) {
         .cloned()
         .unwrap_or_default();
 
-    let mut proportional = vec![DEJAVU.to_owned()];
-    proportional.extend(existing.into_iter().filter(|f| f != DEJAVU));
+    let mut proportional = vec![GELASIO.to_owned()];
+    proportional.extend(existing.into_iter().filter(|f| f != GELASIO));
     fonts
         .families
         .insert(FontFamily::Proportional, proportional.clone());
 
-    let mut bold = vec![DEJAVU_BOLD.to_owned()];
+    let mut bold = vec![GELASIO_BOLD.to_owned()];
     bold.extend(proportional);
     fonts
         .families

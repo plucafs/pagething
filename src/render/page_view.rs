@@ -12,6 +12,7 @@ use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, MARGINS, RULE_HEI
 const PAGE_BORDER: Color32 = Color32::from_gray(120);
 const PAGE_NUMBER_COLOR: Color32 = Color32::from_gray(60);
 const RULE_COLOR: Color32 = Color32::from_gray(150);
+const TEXT_FALLBACK: Color32 = Color32::from_gray(40);
 
 pub struct PageView<'a> {
     pub page: &'a Page,
@@ -63,15 +64,20 @@ pub fn paint_page(
                 row_heights: _,
             } => {
                 let (galley, paint_scale) = cache.galley_for(ctx, item.block, galley, job, zoom);
-                paint_rows(
-                    painter,
-                    &galley,
-                    item.row_start,
-                    item.row_end,
-                    origin + Vec2::new(indent * zoom, 0.0),
-                    paint_scale,
-                    pv.font_uv,
-                );
+                let piece_origin = origin + Vec2::new(indent * zoom, 0.0);
+                if paint_scale == 1.0 {
+                    paint_text_piece(painter, &galley, item.row_start, item.row_end, piece_origin);
+                } else {
+                    paint_rows_mesh(
+                        painter,
+                        &galley,
+                        item.row_start,
+                        item.row_end,
+                        piece_origin,
+                        paint_scale,
+                        pv.font_uv,
+                    );
+                }
             }
             LaidKind::Image { texture, size } => {
                 let rect = Rect::from_min_size(origin + Vec2::new(0.0, 0.0), *size * zoom);
@@ -93,12 +99,56 @@ pub fn paint_page(
     paint_page_number(painter, screen_rect, zoom, pv.number);
 }
 
+/// Screen rect of a piece (a block's rows `[row_start..row_end]`) painted at
+/// `origin`, plus the galley position that puts `row_start` there.
+pub fn piece_rect(
+    galley: &egui::text::Galley,
+    row_start: usize,
+    row_end: usize,
+    origin: Pos2,
+) -> Option<(Rect, Pos2)> {
+    if row_start >= row_end || row_start >= galley.rows.len() {
+        return None;
+    }
+    let row_end = row_end.min(galley.rows.len());
+    let base = galley.rows[row_start].pos;
+    let bottom = galley.rows[row_end - 1].rect().bottom();
+    let height = (bottom - base.y).max(1.0);
+    let width = galley.rect.width().max(1.0) + 8.0;
+    let clip = Rect::from_min_size(origin, Vec2::new(width, height));
+    let galley_pos = origin - base.to_vec2();
+    Some((clip, galley_pos))
+}
+
+/// Paint a piece via `TextShape`: no mesh cloning, no per-vertex work on our
+/// side — egui culls rows outside the clip rect and batches the rest into one
+/// mesh. Requires a galley already laid out at screen scale (`paint_scale == 1`).
+fn paint_text_piece(
+    painter: &Painter,
+    galley: &Arc<egui::text::Galley>,
+    row_start: usize,
+    row_end: usize,
+    origin: Pos2,
+) {
+    let Some((clip, galley_pos)) = piece_rect(galley, row_start, row_end, origin) else {
+        return;
+    };
+    painter
+        .with_clip_rect(clip)
+        .add(egui::Shape::Text(egui::epaint::TextShape::new(
+            galley_pos,
+            Arc::clone(galley),
+            TEXT_FALLBACK,
+        )));
+}
+
 /// Reposition a row's pre-tessellated mesh for painting at `row_origin`.
 /// `scale` is the factor mesh coordinates still need (1.0 for re-laid galleys).
 ///
-/// `RowVisuals::mesh` stores UVs in font-texture *texels*; painting it as a raw
-/// `Shape::Mesh` requires normalizing them to 0..1 first (the `Shape::Text` path
-/// does this in `tessellate_text`, a raw mesh never gets that treatment).
+/// Fallback path only (galley row-count drift after re-layout): the fast path
+/// is [`paint_text_piece`]. When used, `RowVisuals::mesh` UVs are in font-texture
+/// *texels* and must be normalized to 0..1 (the `Shape::Text` path does this in
+/// `tessellate_text`; a raw mesh never gets that treatment).
 fn transform_row_mesh(mesh: &Mesh, row_origin: Pos2, scale: f32, font_uv: Vec2) -> Mesh {
     let mut out = mesh.clone();
     for v in &mut out.vertices {
@@ -108,7 +158,7 @@ fn transform_row_mesh(mesh: &Mesh, row_origin: Pos2, scale: f32, font_uv: Vec2) 
     out
 }
 
-fn paint_rows(
+fn paint_rows_mesh(
     painter: &Painter,
     galley: &egui::text::Galley,
     row_start: usize,
@@ -217,5 +267,71 @@ mod tests {
                 v.uv.y
             );
         }
+    }
+
+    #[test]
+    fn piece_rect_matches_row_band() {
+        let ctx = egui::Context::default();
+        crate::render::fonts::install(&ctx);
+
+        let mut captured = None;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = 120.0;
+            job.append(
+                "word ".repeat(30).as_str(),
+                0.0,
+                egui::TextFormat::default(),
+            );
+            let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+            assert!(galley.rows.len() >= 3);
+
+            let origin = pos2(50.0, 60.0);
+            let (clip, galley_pos) = piece_rect(&galley, 1, 3, origin).unwrap();
+            let expected_h = galley.rows[2].rect().bottom() - galley.rows[1].pos.y;
+            let expected_pos = origin - galley.rows[1].pos.to_vec2();
+
+            captured = Some((
+                clip,
+                galley_pos,
+                expected_h,
+                expected_pos,
+                galley.rect.width(),
+            ));
+        });
+        output.textures_delta.clear();
+
+        let (clip, galley_pos, expected_h, expected_pos, galley_width) = captured.unwrap();
+        assert_eq!(clip.min, pos2(50.0, 60.0));
+        assert!((clip.height() - expected_h).abs() < 1e-4);
+        assert!((clip.width() - (galley_width + 8.0)).abs() < 1e-4);
+        assert!((galley_pos - expected_pos).length() < 1e-4);
+    }
+
+    #[test]
+    fn piece_rect_rejects_empty_or_out_of_range() {
+        let ctx = egui::Context::default();
+        crate::render::fonts::install(&ctx);
+
+        let mut bad = (false, false, false);
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = 120.0;
+            job.append(
+                "word ".repeat(30).as_str(),
+                0.0,
+                egui::TextFormat::default(),
+            );
+            let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+            let n = galley.rows.len();
+            let origin = pos2(0.0, 0.0);
+            bad = (
+                piece_rect(&galley, 1, 1, origin).is_none(),
+                piece_rect(&galley, 2, 1, origin).is_none(),
+                piece_rect(&galley, n, n + 5, origin).is_none(),
+            );
+        });
+        output.textures_delta.clear();
+        assert_eq!(bad, (true, true, true));
     }
 }
