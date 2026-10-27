@@ -318,7 +318,9 @@ impl PagethingApp {
 
         let ctx = ui.ctx().clone();
         self.apply_dialog(canvas_rect, &ctx);
-        ctx.request_repaint();
+        if matches!(self.phase, Phase::Loading { .. }) {
+            ctx.request_repaint();
+        }
     }
 }
 
