@@ -1,18 +1,12 @@
 use std::sync::Arc;
 
-use eframe::egui::{
-    self, Align2, Color32, FontId, Mesh, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2,
-};
+use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use crate::book::paginate::{Page, PageKind};
 use crate::canvas::grid::PAGE_SIZE;
-use crate::canvas::view::{PAPER_BG, View};
-use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, MARGINS, RULE_HEIGHT};
-
-const PAGE_BORDER: Color32 = Color32::from_gray(120);
-const PAGE_NUMBER_COLOR: Color32 = Color32::from_gray(60);
-const RULE_COLOR: Color32 = Color32::from_gray(150);
-const TEXT_FALLBACK: Color32 = Color32::from_gray(40);
+use crate::canvas::view::View;
+use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, Margins, RULE_HEIGHT};
+use crate::render::theme::PageColors;
 
 pub struct PageView<'a> {
     pub page: &'a Page,
@@ -20,6 +14,8 @@ pub struct PageView<'a> {
     pub cover: Option<&'a Arc<egui::TextureHandle>>,
     pub number: usize,
     pub font_uv: Vec2,
+    pub margins: Margins,
+    pub colors: PageColors,
 }
 
 pub fn paint_page(
@@ -30,11 +26,11 @@ pub fn paint_page(
     screen_rect: Rect,
     pv: &PageView<'_>,
 ) {
-    painter.rect_filled(screen_rect, 2.0, PAPER_BG);
+    painter.rect_filled(screen_rect, 2.0, pv.colors.bg);
     painter.rect_stroke(
         screen_rect,
         2.0,
-        Stroke::new(1.0, PAGE_BORDER),
+        Stroke::new(1.0, pv.colors.border),
         StrokeKind::Outside,
     );
 
@@ -44,11 +40,18 @@ pub fn paint_page(
         if let Some(cover) = pv.cover {
             paint_image_cover(painter, screen_rect, cover);
         }
-        paint_page_number(painter, screen_rect, zoom, pv.number);
+        paint_page_number(
+            painter,
+            screen_rect,
+            zoom,
+            pv.number,
+            pv.margins.bottom,
+            pv.colors.page_number,
+        );
         return;
     }
 
-    let content_origin = screen_rect.min + Vec2::new(MARGINS.left, MARGINS.top) * zoom;
+    let content_origin = screen_rect.min + Vec2::new(pv.margins.left, pv.margins.top) * zoom;
 
     for item in &pv.page.items {
         let Some(block) = pv.laid.get(item.block) else {
@@ -66,7 +69,14 @@ pub fn paint_page(
                 let (galley, paint_scale) = cache.galley_for(ctx, item.block, galley, job, zoom);
                 let piece_origin = origin + Vec2::new(indent * zoom, 0.0);
                 if paint_scale == 1.0 {
-                    paint_text_piece(painter, &galley, item.row_start, item.row_end, piece_origin);
+                    paint_text_piece(
+                        painter,
+                        &galley,
+                        item.row_start,
+                        item.row_end,
+                        piece_origin,
+                        pv.colors.body,
+                    );
                 } else {
                     paint_rows_mesh(
                         painter,
@@ -89,14 +99,21 @@ pub fn paint_page(
                 );
             }
             LaidKind::Rule => {
-                let width = (PAGE_SIZE.x - MARGINS.left - MARGINS.right) * zoom;
+                let width = (PAGE_SIZE.x - pv.margins.left - pv.margins.right) * zoom;
                 let rect = Rect::from_min_size(origin, Vec2::new(width, RULE_HEIGHT * zoom));
-                painter.rect_filled(rect, 0.0, RULE_COLOR);
+                painter.rect_filled(rect, 0.0, pv.colors.rule);
             }
         }
     }
 
-    paint_page_number(painter, screen_rect, zoom, pv.number);
+    paint_page_number(
+        painter,
+        screen_rect,
+        zoom,
+        pv.number,
+        pv.margins.bottom,
+        pv.colors.page_number,
+    );
 }
 
 /// Screen rect of a piece (a block's rows `[row_start..row_end]`) painted at
@@ -129,6 +146,7 @@ fn paint_text_piece(
     row_start: usize,
     row_end: usize,
     origin: Pos2,
+    fallback: Color32,
 ) {
     let Some((clip, galley_pos)) = piece_rect(galley, row_start, row_end, origin) else {
         return;
@@ -138,7 +156,7 @@ fn paint_text_piece(
         .add(egui::Shape::Text(egui::epaint::TextShape::new(
             galley_pos,
             Arc::clone(galley),
-            TEXT_FALLBACK,
+            fallback,
         )));
 }
 
@@ -204,17 +222,24 @@ fn paint_image_cover(painter: &Painter, rect: Rect, texture: &egui::TextureHandl
     painter.image(texture.id(), rect, uv, Color32::WHITE);
 }
 
-fn paint_page_number(painter: &Painter, screen_rect: Rect, zoom: f32, number: usize) {
+fn paint_page_number(
+    painter: &Painter,
+    screen_rect: Rect,
+    zoom: f32,
+    number: usize,
+    bottom_margin: f32,
+    color: Color32,
+) {
     let pos = egui::pos2(
         screen_rect.center().x,
-        screen_rect.bottom() - MARGINS.bottom * 0.45 * zoom,
+        screen_rect.bottom() - bottom_margin * 0.45 * zoom,
     );
     painter.text(
         pos,
         Align2::CENTER_BOTTOM,
         number.to_string(),
-        FontId::proportional(11.0 * zoom),
-        PAGE_NUMBER_COLOR,
+        crate::render::fonts::book(11.0 * zoom),
+        color,
     );
 }
 
@@ -272,7 +297,7 @@ mod tests {
     #[test]
     fn piece_rect_matches_row_band() {
         let ctx = egui::Context::default();
-        crate::render::fonts::install(&ctx);
+        crate::render::fonts::install_for_tests(&ctx);
 
         let mut captured = None;
         let mut output = ctx.run_ui(Default::default(), |ui| {
@@ -311,7 +336,7 @@ mod tests {
     #[test]
     fn piece_rect_rejects_empty_or_out_of_range() {
         let ctx = egui::Context::default();
-        crate::render::fonts::install(&ctx);
+        crate::render::fonts::install_for_tests(&ctx);
 
         let mut bad = (false, false, false);
         let mut output = ctx.run_ui(Default::default(), |ui| {

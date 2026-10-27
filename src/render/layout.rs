@@ -9,8 +9,9 @@ use crate::book::blocks::{Block, Span};
 use crate::book::paginate::BlockMetrics;
 use crate::canvas::grid::PAGE_SIZE;
 use crate::render::fonts;
+use crate::render::theme::PageColors;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Margins {
     pub left: f32,
     pub right: f32,
@@ -18,21 +19,27 @@ pub struct Margins {
     pub bottom: f32,
 }
 
-pub const MARGINS: Margins = Margins {
-    left: 48.0,
-    right: 48.0,
-    top: 48.0,
-    bottom: 72.0,
-};
+impl Margins {
+    pub const fn uniform(value: f32) -> Self {
+        Self {
+            left: value,
+            right: value,
+            top: value,
+            bottom: value,
+        }
+    }
+}
+
+pub const DEFAULT_MARGINS: Margins = Margins::uniform(48.0);
 
 pub const RULE_HEIGHT: f32 = 2.0;
 
-pub fn content_width() -> f32 {
-    PAGE_SIZE.x - MARGINS.left - MARGINS.right
+pub fn content_width(margins: &Margins) -> f32 {
+    PAGE_SIZE.x - margins.left - margins.right
 }
 
-pub fn content_height() -> f32 {
-    PAGE_SIZE.y - MARGINS.top - MARGINS.bottom
+pub fn content_height(margins: &Margins) -> f32 {
+    PAGE_SIZE.y - margins.top - margins.bottom
 }
 
 pub enum LaidKind {
@@ -76,10 +83,10 @@ impl LaidBlock {
     }
 }
 
-const BODY_SIZE: f32 = 12.0;
-const BODY_COLOR: Color32 = Color32::from_gray(40);
-const QUOTE_COLOR: Color32 = Color32::from_gray(90);
-const CODE_BG: Color32 = Color32::from_gray(235);
+const BODY_SIZE: f32 = 14.0;
+const BODY_LEADING: f32 = BODY_SIZE * 1.4;
+const HEADING_LEADING: f32 = 1.25;
+const PARA_INDENT: f32 = BODY_SIZE * 2.0;
 
 fn heading_size(level: u8) -> f32 {
     match level {
@@ -95,7 +102,7 @@ fn heading_size(level: u8) -> f32 {
 struct FlatBlock {
     space_above: f32,
     indent: f32,
-    quote: bool,
+    flush: bool,
     kind: FlatKind,
 }
 
@@ -106,27 +113,34 @@ enum FlatKind {
     Rule,
 }
 
-fn flatten(blocks: &[Block], indent: f32, quote: bool, out: &mut Vec<FlatBlock>) {
+fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
+    let mut flush = true;
     for block in blocks {
         match block {
-            Block::Heading { level, spans } => out.push(FlatBlock {
-                space_above: if *level <= 2 { 20.0 } else { 14.0 },
-                indent,
-                quote,
-                kind: FlatKind::Heading {
-                    level: *level,
-                    spans: spans.clone(),
-                },
-            }),
-            Block::Para(spans) => out.push(FlatBlock {
-                space_above: 6.0,
-                indent,
-                quote,
-                kind: FlatKind::Para {
-                    spans: spans.clone(),
-                },
-            }),
-            Block::Quote(inner) => flatten(inner, indent + 16.0, true, out),
+            Block::Heading { level, spans } => {
+                out.push(FlatBlock {
+                    space_above: if *level <= 2 { 20.0 } else { 14.0 },
+                    indent,
+                    flush: false,
+                    kind: FlatKind::Heading {
+                        level: *level,
+                        spans: spans.clone(),
+                    },
+                });
+                flush = true;
+            }
+            Block::Para(spans) => {
+                out.push(FlatBlock {
+                    space_above: 0.0,
+                    indent,
+                    flush,
+                    kind: FlatKind::Para {
+                        spans: spans.clone(),
+                    },
+                });
+                flush = false;
+            }
+            Block::Quote(inner) => flatten(inner, indent + 16.0, out),
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
                     let prefix = if *ordered {
@@ -135,7 +149,7 @@ fn flatten(blocks: &[Block], indent: f32, quote: bool, out: &mut Vec<FlatBlock>)
                         "• ".to_string()
                     };
                     let start = out.len();
-                    flatten(item, indent + 18.0, quote, out);
+                    flatten(item, indent + 18.0, out);
                     if let Some(fb) = out.get_mut(start)
                         && let FlatKind::Para { spans } = &mut fb.kind
                     {
@@ -148,33 +162,48 @@ fn flatten(blocks: &[Block], indent: f32, quote: bool, out: &mut Vec<FlatBlock>)
                         );
                     }
                 }
+                flush = false;
             }
-            Block::Image { path, alt: _ } => out.push(FlatBlock {
-                space_above: 10.0,
-                indent,
-                quote,
-                kind: FlatKind::Image { path: path.clone() },
-            }),
-            Block::Rule => out.push(FlatBlock {
-                space_above: 12.0,
-                indent,
-                quote,
-                kind: FlatKind::Rule,
-            }),
+            Block::Image { path, alt: _ } => {
+                out.push(FlatBlock {
+                    space_above: 10.0,
+                    indent,
+                    flush: false,
+                    kind: FlatKind::Image { path: path.clone() },
+                });
+                flush = true;
+            }
+            Block::Rule => {
+                out.push(FlatBlock {
+                    space_above: 12.0,
+                    indent,
+                    flush: false,
+                    kind: FlatKind::Rule,
+                });
+                flush = true;
+            }
         }
     }
 }
 
-fn push_spans(job: &mut LayoutJob, spans: &[Span], size: f32, color: Color32) {
+fn push_spans(
+    job: &mut LayoutJob,
+    spans: &[Span],
+    size: f32,
+    color: Color32,
+    code_bg: Color32,
+    line_height: f32,
+) {
     for span in spans {
         let mut format = egui::TextFormat {
-            font_id: FontId::proportional(size),
+            font_id: fonts::book(size),
             color,
+            line_height: Some(line_height),
             ..Default::default()
         };
         if span.code {
             format.font_id = FontId::monospace(size * 0.9);
-            format.background = CODE_BG;
+            format.background = code_bg;
         } else if span.bold {
             format.font_id = fonts::bold(size);
         }
@@ -205,18 +234,32 @@ pub fn layout_blocks(
     blocks: &[Block],
     images: &HashMap<String, Arc<TextureHandle>>,
     content_width: f32,
+    content_height: f32,
+    colors: &PageColors,
 ) -> Vec<LaidBlock> {
     let mut flat = Vec::new();
-    flatten(blocks, 0.0, false, &mut flat);
+    flatten(blocks, 0.0, &mut flat);
 
     let mut out = Vec::with_capacity(flat.len());
     for fb in flat {
         match fb.kind {
             FlatKind::Para { spans } => {
-                let color = if fb.quote { QUOTE_COLOR } else { BODY_COLOR };
                 let mut job = LayoutJob::default();
                 job.wrap.max_width = content_width - fb.indent;
-                push_spans(&mut job, &spans, BODY_SIZE, color);
+                job.justify = true;
+                push_spans(
+                    &mut job,
+                    &spans,
+                    BODY_SIZE,
+                    colors.body,
+                    colors.code_bg,
+                    BODY_LEADING,
+                );
+                if !fb.flush
+                    && let Some(first) = job.sections.first_mut()
+                {
+                    first.leading_space += PARA_INDENT;
+                }
                 if job.text.is_empty() {
                     continue;
                 }
@@ -239,11 +282,17 @@ pub fn layout_blocks(
             FlatKind::Heading { level, spans } => {
                 let mut job = LayoutJob::default();
                 job.wrap.max_width = content_width - fb.indent;
+                if level == 1 {
+                    job.halign = egui::Align::Center;
+                }
+                let size = heading_size(level);
                 push_spans(
                     &mut job,
                     &spans,
-                    heading_size(level),
-                    Color32::from_gray(20),
+                    size,
+                    colors.heading,
+                    colors.code_bg,
+                    size * HEADING_LEADING,
                 );
                 if job.text.is_empty() {
                     continue;
@@ -271,8 +320,8 @@ pub fn layout_blocks(
                 let size = texture.size_vec2();
                 let max_w = content_width - fb.indent;
                 let mut scale = (max_w / size.x).min(1.0);
-                if size.y * scale > content_height() {
-                    scale = content_height() / size.y;
+                if size.y * scale > content_height {
+                    scale = content_height / size.y;
                 }
                 out.push(LaidBlock {
                     space_above: fb.space_above,
@@ -372,9 +421,85 @@ pub fn load_texture(ctx: &Context, name: &str, image: &egui::ColorImage) -> Text
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::book::blocks::{Block, Span};
     use crate::book::paginate;
     use crate::book::prepare::prepare;
     use std::path::Path;
+
+    #[test]
+    fn body_jobs_are_justified_with_book_leading_and_indent() {
+        let ctx = Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+
+        let spans = || {
+            vec![Span {
+                text: "word ".repeat(30),
+                ..Default::default()
+            }]
+        };
+        let blocks = vec![
+            Block::Heading {
+                level: 1,
+                spans: vec![Span {
+                    text: "Chapter One".to_owned(),
+                    ..Default::default()
+                }],
+            },
+            Block::Para(spans()),
+            Block::Para(spans()),
+            Block::Heading {
+                level: 2,
+                spans: vec![Span {
+                    text: "Section".to_owned(),
+                    ..Default::default()
+                }],
+            },
+            Block::Para(spans()),
+        ];
+
+        let margins = DEFAULT_MARGINS;
+        let colors = PageColors::PAPER;
+        let mut jobs: Vec<LayoutJob> = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let laid = layout_blocks(
+                ui.ctx(),
+                &blocks,
+                &HashMap::new(),
+                content_width(&margins),
+                content_height(&margins),
+                &colors,
+            );
+            for b in &laid {
+                if let LaidKind::Text { job, .. } = &b.kind {
+                    jobs.push((**job).clone());
+                }
+            }
+        });
+        output.textures_delta.clear();
+        assert_eq!(jobs.len(), 5);
+
+        assert_eq!(jobs[0].halign, egui::Align::Center);
+        assert!(!jobs[0].justify);
+        let h1_leading = jobs[0].sections[0].format.line_height.unwrap();
+        assert!(
+            (h1_leading - heading_size(1) * HEADING_LEADING).abs() < 1e-3,
+            "headings get tighter leading ratio than body"
+        );
+
+        assert!(jobs[1].justify);
+        assert_eq!(jobs[1].sections[0].leading_space, 0.0);
+        assert_eq!(jobs[1].sections[0].format.line_height, Some(BODY_LEADING));
+
+        assert!(jobs[2].justify);
+        assert_eq!(jobs[2].sections[0].leading_space, PARA_INDENT);
+
+        assert_eq!(jobs[3].halign, egui::Align::LEFT);
+
+        assert_eq!(
+            jobs[4].sections[0].leading_space, 0.0,
+            "flush after heading"
+        );
+    }
 
     #[test]
     fn lays_out_and_paginates_real_book() {
@@ -383,17 +508,29 @@ mod tests {
         assert!(!raw.blocks.is_empty());
 
         let ctx = Context::default();
-        crate::render::fonts::install(&ctx);
+        crate::render::fonts::install_for_tests(&ctx);
+
+        let margins = DEFAULT_MARGINS;
+        let width = content_width(&margins);
+        let height = content_height(&margins);
+        let colors = PageColors::PAPER;
 
         let mut laid = Vec::new();
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            laid = layout_blocks(ui.ctx(), &raw.blocks, &HashMap::new(), content_width());
+            laid = layout_blocks(
+                ui.ctx(),
+                &raw.blocks,
+                &HashMap::new(),
+                width,
+                height,
+                &colors,
+            );
         });
         output.textures_delta.clear();
         assert!(!laid.is_empty());
 
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
-        let pages = paginate::paginate(&metrics, content_height(), raw.cover.is_some());
+        let pages = paginate::paginate(&metrics, height, raw.cover.is_some());
         assert!(pages.len() > 50);
 
         for page in &pages {
@@ -401,10 +538,58 @@ mod tests {
                 continue;
             }
             for item in &page.items {
-                assert!(item.y < content_height() + 1.0);
+                assert!(item.y < height + 1.0);
                 assert!(item.row_start < item.row_end);
             }
         }
+    }
+
+    #[test]
+    fn page_colors_do_not_affect_row_breaks() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/books/pg1342.epub");
+        let raw = prepare(&path).expect("prepare pg1342");
+
+        let ctx = Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+
+        let margins = DEFAULT_MARGINS;
+        let width = content_width(&margins);
+        let height = content_height(&margins);
+
+        let mut paper_rows = Vec::new();
+        let mut dark_rows = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let paper = layout_blocks(
+                ui.ctx(),
+                &raw.blocks,
+                &HashMap::new(),
+                width,
+                height,
+                &PageColors::PAPER,
+            );
+            let dark = layout_blocks(
+                ui.ctx(),
+                &raw.blocks,
+                &HashMap::new(),
+                width,
+                height,
+                &PageColors::DARK_PAGES,
+            );
+            for block in &paper {
+                if let LaidKind::Text { row_heights, .. } = &block.kind {
+                    paper_rows.push(row_heights.len());
+                }
+            }
+            for block in &dark {
+                if let LaidKind::Text { row_heights, .. } = &block.kind {
+                    dark_rows.push(row_heights.len());
+                }
+            }
+        });
+        output.textures_delta.clear();
+
+        assert!(!paper_rows.is_empty());
+        assert_eq!(paper_rows, dark_rows);
     }
 
     #[test]
@@ -434,12 +619,20 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/books/pg1342.epub");
         let raw = prepare(&path).expect("prepare pg1342");
         let ctx = Context::default();
-        crate::render::fonts::install(&ctx);
+        crate::render::fonts::install_for_tests(&ctx);
 
         let mut cache = DisplayCache::default();
         let mut checked = 0usize;
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            let laid = layout_blocks(ui.ctx(), &raw.blocks, &HashMap::new(), content_width());
+            let margins = DEFAULT_MARGINS;
+            let laid = layout_blocks(
+                ui.ctx(),
+                &raw.blocks,
+                &HashMap::new(),
+                content_width(&margins),
+                content_height(&margins),
+                &PageColors::PAPER,
+            );
             for (bi, block) in laid.iter().enumerate() {
                 if let LaidKind::Text { galley, job, .. } = &block.kind {
                     let (g, scale) = cache.galley_for(ui.ctx(), bi, galley, job, 1.5);

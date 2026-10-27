@@ -5,13 +5,15 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui::{self, Color32, Key, Modifiers, ViewportCommand};
 
+use crate::book::blocks::Block;
 use crate::book::paginate;
 use crate::book::prepare::{self, PreparedBook};
-use crate::canvas::{self, View, grid};
+use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
-use crate::persist::{SettingsStore, ViewState, ViewStore};
-use crate::render::layout::{self, DisplayCache, LaidBlock};
+use crate::persist::{Settings, SettingsStore, ThemePref, ViewState, ViewStore};
+use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
+use crate::render::theme::{self, PageColors};
 
 const MAX_RECENTS: usize = 10;
 
@@ -20,6 +22,8 @@ struct LoadedBook {
     cover: Option<Arc<egui::TextureHandle>>,
     laid: Vec<LaidBlock>,
     pages: Vec<paginate::Page>,
+    blocks: Vec<Block>,
+    textures: HashMap<String, Arc<egui::TextureHandle>>,
 }
 
 enum Phase {
@@ -43,13 +47,18 @@ pub struct PagethingApp {
     settings: SettingsStore,
     current_book: Option<PathBuf>,
     dialog: Option<Dialog>,
+    pending_jump: Option<usize>,
+    text_rendering: fastframe_text::TextRendering,
 }
 
 impl PagethingApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        crate::render::fonts::install(&cc.egui_ctx);
+        let text_rendering = fastframe_text::detect();
+        crate::render::fonts::install(&cc.egui_ctx, &text_rendering);
         let settings = SettingsStore::load();
-        Self {
+        apply_theme_pref(&cc.egui_ctx, settings.settings().theme);
+        cc.egui_ctx.set_zoom_factor(settings.settings().ui_scale);
+        let mut app = Self {
             view: View::default(),
             columns: settings.settings().columns,
             phase: Phase::Empty { error: None },
@@ -60,7 +69,15 @@ impl PagethingApp {
             settings,
             current_book: None,
             dialog: None,
+            pending_jump: None,
+            text_rendering,
+        };
+        if let Some(latest) = app.recents.first().cloned()
+            && latest.exists()
+        {
+            app.open_path(latest);
         }
+        app
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -107,7 +124,7 @@ impl PagethingApp {
         save_recents(&self.recents);
     }
 
-    fn build_book(ctx: &egui::Context, raw: PreparedBook) -> LoadedBook {
+    fn build_book(ctx: &egui::Context, raw: PreparedBook, settings: Settings) -> LoadedBook {
         let mut textures = HashMap::new();
         for (name, image) in raw.images {
             let handle = layout::load_texture(ctx, &name, &image);
@@ -117,15 +134,27 @@ impl PagethingApp {
             .cover
             .map(|image| Arc::new(layout::load_texture(ctx, "cover", &image)));
 
-        let laid = layout::layout_blocks(ctx, &raw.blocks, &textures, layout::content_width());
+        let margins = Margins::uniform(settings.margin);
+        let width = layout::content_width(&margins);
+        let height = layout::content_height(&margins);
+        let laid = layout::layout_blocks(
+            ctx,
+            &raw.blocks,
+            &textures,
+            width,
+            height,
+            &PageColors::for_mode(settings.page_mode),
+        );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
-        let pages = paginate::paginate(&metrics, layout::content_height(), cover.is_some());
+        let pages = paginate::paginate(&metrics, height, cover.is_some());
 
         LoadedBook {
             title: raw.title,
             cover,
             laid,
             pages,
+            blocks: raw.blocks,
+            textures,
         }
     }
 
@@ -144,7 +173,7 @@ impl PagethingApp {
         if let Some(result) = outcome {
             match result {
                 Ok(raw) => {
-                    let book = Self::build_book(ctx, raw);
+                    let book = Self::build_book(ctx, raw, self.settings.settings());
                     self.phase = Phase::Ready(book);
                 }
                 Err(error) => self.phase = Phase::Empty { error: Some(error) },
@@ -152,9 +181,33 @@ impl PagethingApp {
         }
     }
 
+    fn rebuild_ready_book(&mut self, ctx: &egui::Context) {
+        let Phase::Ready(book) = &mut self.phase else {
+            return;
+        };
+        let settings = self.settings.settings();
+        let margins = Margins::uniform(settings.margin);
+        let width = layout::content_width(&margins);
+        let height = layout::content_height(&margins);
+        book.laid = layout::layout_blocks(
+            ctx,
+            &book.blocks,
+            &book.textures,
+            width,
+            height,
+            &PageColors::for_mode(settings.page_mode),
+        );
+        let metrics: Vec<_> = book.laid.iter().map(|b| b.metrics()).collect();
+        book.pages = paginate::paginate(&metrics, height, book.cover.is_some());
+        self.display_cache.clear();
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
             self.want_open = true;
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
+            spawn_new_instance();
         }
         if dialogs::consume_shortcut(ctx, Key::G) && matches!(self.phase, Phase::Ready(_)) {
             self.dialog = Some(Dialog::Jump {
@@ -166,6 +219,24 @@ impl PagethingApp {
                 input: self.columns.to_string(),
             });
         }
+        if dialogs::consume_shortcut(ctx, Key::Comma) {
+            self.dialog = Some(Dialog::Settings {
+                draft: self.settings.settings(),
+            });
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Q)) {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if self.dialog.is_none()
+            && let Phase::Ready(book) = &self.phase
+        {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
+                self.pending_jump = Some(1);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
+                self.pending_jump = Some(book.pages.len());
+            }
+        }
         self.view.handle_shortcuts(ctx);
     }
 
@@ -176,6 +247,13 @@ impl PagethingApp {
                     if ui.button("Open…").clicked() {
                         ui.close();
                         self.want_open = true;
+                    }
+                    if ui
+                        .add(egui::Button::new("New Window").shortcut_text("Ctrl+N"))
+                        .clicked()
+                    {
+                        ui.close();
+                        spawn_new_instance();
                     }
                     ui.add_enabled_ui(!self.recents.is_empty(), |ui| {
                         ui.menu_button("Recent", |ui| {
@@ -196,16 +274,39 @@ impl PagethingApp {
                         });
                     });
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui
+                        .add(egui::Button::new("Settings…").shortcut_text("Ctrl+,"))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.dialog = Some(Dialog::Settings {
+                            draft: self.settings.settings(),
+                        });
+                    }
+                    ui.separator();
+                    if ui
+                        .add(egui::Button::new("Quit").shortcut_text("Ctrl+Q"))
+                        .clicked()
+                    {
                         ui.send_viewport_cmd(ViewportCommand::Close);
                     }
                 });
+            });
+        });
+    }
 
-                if let Phase::Ready(book) = &self.phase
-                    && let Some(title) = &book.title
-                {
-                    ui.label(egui::RichText::new(title).weak());
-                }
+    fn title_bar(&mut self, ui: &mut egui::Ui) {
+        let Phase::Ready(book) = &self.phase else {
+            return;
+        };
+        let Some(title) = book.title.clone() else {
+            return;
+        };
+        egui::Panel::top("book_title").show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(title).size(13.0).strong());
+                ui.add_space(2.0);
             });
         });
     }
@@ -224,6 +325,15 @@ impl PagethingApp {
         }
     }
 
+    fn jump_to_page(&mut self, page: usize, canvas_rect: egui::Rect) {
+        if page == 0 {
+            return;
+        }
+        let world_rect = grid::page_rect(page - 1, self.columns, grid::GAP);
+        let world_center = world_rect.center();
+        self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
+    }
+
     fn apply_dialog(&mut self, canvas_rect: egui::Rect, ctx: &egui::Context) {
         let Some(dialog) = &mut self.dialog else {
             return;
@@ -238,14 +348,25 @@ impl PagethingApp {
             Outcome::Close => self.dialog = None,
             Outcome::Jumped(page) => {
                 self.dialog = None;
-                let world_rect = grid::page_rect(page - 1, self.columns, grid::GAP);
-                let world_center = world_rect.center();
-                self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
+                self.jump_to_page(page, canvas_rect);
             }
             Outcome::Columns(columns) => {
                 self.dialog = None;
                 self.columns = columns;
-                self.settings.set_columns(columns);
+                self.settings.update(|s| s.columns = columns);
+            }
+            Outcome::Settings(changed) => {
+                let prev = self.settings.settings();
+                self.settings.update(|s| *s = changed);
+                if changed.theme != prev.theme {
+                    apply_theme_pref(ctx, changed.theme);
+                }
+                if changed.ui_scale != prev.ui_scale {
+                    ctx.set_zoom_factor(changed.ui_scale);
+                }
+                if changed.margin != prev.margin || changed.page_mode != prev.page_mode {
+                    self.rebuild_ready_book(ctx);
+                }
             }
         }
     }
@@ -255,8 +376,12 @@ impl PagethingApp {
         let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
         self.view.handle_input(ui.ctx(), canvas_rect, &response);
 
+        if let Some(page) = self.pending_jump.take() {
+            self.jump_to_page(page, canvas_rect);
+        }
+
         let painter = ui.painter().with_clip_rect(canvas_rect);
-        painter.rect_filled(canvas_rect, 0.0, canvas::CANVAS_BG);
+        painter.rect_filled(canvas_rect, 0.0, theme::canvas_bg(ui.ctx().theme()));
 
         match &self.phase {
             Phase::Empty { error } => {
@@ -265,7 +390,10 @@ impl PagethingApp {
                         format!("Could not open book: {e}"),
                         Color32::from_rgb(220, 100, 100),
                     ),
-                    None => ("Ctrl+O to open an EPUB".to_owned(), Color32::from_gray(160)),
+                    None => (
+                        "Ctrl+O to open an EPUB".to_owned(),
+                        theme::hint_color(ui.ctx().theme()),
+                    ),
                 };
                 painter.text(
                     canvas_rect.center(),
@@ -281,7 +409,7 @@ impl PagethingApp {
                     egui::Align2::CENTER_CENTER,
                     "Loading…",
                     egui::FontId::proportional(18.0),
-                    Color32::WHITE,
+                    theme::loading_color(ui.ctx().theme()),
                 );
             }
             Phase::Ready(book) => {
@@ -291,6 +419,9 @@ impl PagethingApp {
                     1.0 / font_size[0].max(1) as f32,
                     1.0 / font_size[1].max(1) as f32,
                 );
+                let settings = self.settings.settings();
+                let margins = Margins::uniform(settings.margin);
+                let colors = PageColors::for_mode(settings.page_mode);
                 for (i, page) in book.pages.iter().enumerate() {
                     let world_rect = grid::page_rect(i, self.columns, grid::GAP);
                     let screen_rect = self.view.to_screen_rect(world_rect);
@@ -303,6 +434,8 @@ impl PagethingApp {
                         cover: book.cover.as_ref(),
                         number: i + 1,
                         font_uv,
+                        margins,
+                        colors,
                     };
                     page_view::paint_page(
                         &painter,
@@ -327,16 +460,33 @@ impl PagethingApp {
 impl eframe::App for PagethingApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let rendering = self.text_rendering;
+        ctx.all_styles_mut(|style| rendering.apply_to_visuals(&mut style.visuals));
         self.handle_shortcuts(&ctx);
         self.menu_bar(ui);
+        self.title_bar(ui);
         self.run_file_dialog();
         self.poll_loading(&ctx);
         self.paint_canvas(ui);
     }
 
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stash_view();
     }
+}
+
+fn spawn_new_instance() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
+    }
+}
+
+fn apply_theme_pref(ctx: &egui::Context, pref: ThemePref) {
+    ctx.set_theme(match pref {
+        ThemePref::Light => egui::ThemePreference::Light,
+        ThemePref::Dark => egui::ThemePreference::Dark,
+        ThemePref::System => egui::ThemePreference::System,
+    });
 }
 
 fn recents_path() -> Option<PathBuf> {

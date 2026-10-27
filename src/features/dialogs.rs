@@ -1,19 +1,25 @@
 use eframe::egui::{self, Align2, Key, Modifiers};
 
+use crate::persist::{
+    MAX_MARGIN, MAX_UI_SCALE, MIN_MARGIN, MIN_UI_SCALE, PageMode, Settings, ThemePref,
+};
+
 pub const MAX_COLUMNS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
     Jump { input: String },
     Columns { input: String },
+    Settings { draft: Settings },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Outcome {
     Keep,
     Close,
     Jumped(usize),
     Columns(usize),
+    Settings(Settings),
 }
 
 pub fn parse_jump(input: &str, page_count: usize) -> Option<usize> {
@@ -32,39 +38,110 @@ pub fn parse_columns(input: &str) -> Option<usize> {
 pub fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, page_count: usize) -> Outcome {
     let mut outcome = Outcome::Keep;
 
-    let (title, hint) = match dialog {
-        Dialog::Jump { .. } => ("Jump to page", format!("1–{page_count}")),
-        Dialog::Columns { .. } => ("Columns", format!("1–{MAX_COLUMNS}")),
+    let title = match dialog {
+        Dialog::Jump { .. } => "Jump to page",
+        Dialog::Columns { .. } => "Columns",
+        Dialog::Settings { .. } => "Settings",
     };
 
     egui::Window::new(title)
         .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .collapsible(false)
         .resizable(false)
-        .show(ctx, |ui| {
-            let input = match dialog {
-                Dialog::Jump { input } | Dialog::Columns { input } => input,
-            };
-            let edit = ui.add(
-                egui::TextEdit::singleline(input)
-                    .hint_text(hint)
-                    .desired_width(160.0),
-            );
-            edit.request_focus();
+        .show(ctx, |ui| match dialog {
+            Dialog::Jump { input } => {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(input)
+                        .hint_text(format!("1–{page_count}"))
+                        .desired_width(160.0),
+                );
+                edit.request_focus();
 
-            if ui.input(|i| i.key_pressed(Key::Enter)) {
-                outcome = match dialog {
-                    Dialog::Jump { input } => match parse_jump(input, page_count) {
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    outcome = match parse_jump(input, page_count) {
                         Some(page) => Outcome::Jumped(page),
                         None => Outcome::Close,
-                    },
-                    Dialog::Columns { input } => match parse_columns(input) {
+                    };
+                } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::Columns { input } => {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(input)
+                        .hint_text(format!("1–{MAX_COLUMNS}"))
+                        .desired_width(160.0),
+                );
+                edit.request_focus();
+
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    outcome = match parse_columns(input) {
                         Some(columns) => Outcome::Columns(columns),
                         None => Outcome::Close,
-                    },
-                };
-            } else if ui.input(|i| i.key_pressed(Key::Escape)) {
-                outcome = Outcome::Close;
+                    };
+                } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::Settings { draft } => {
+                let mut changed = false;
+
+                ui.label("Margins");
+                let slider = ui.add(
+                    egui::Slider::new(&mut draft.margin, MIN_MARGIN..=MAX_MARGIN)
+                        .step_by(2.0)
+                        .fixed_decimals(0),
+                );
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("UI scale");
+                let scale = ui.add(
+                    egui::Slider::new(&mut draft.ui_scale, MIN_UI_SCALE..=MAX_UI_SCALE)
+                        .step_by(0.1)
+                        .fixed_decimals(2),
+                );
+                if scale.changed() {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Theme");
+                ui.horizontal(|ui| {
+                    for (pref, label) in [
+                        (ThemePref::Light, "Light"),
+                        (ThemePref::Dark, "Dark"),
+                        (ThemePref::System, "System"),
+                    ] {
+                        if ui.selectable_value(&mut draft.theme, pref, label).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.label("Page mode");
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (PageMode::Paper, "Paper"),
+                        (PageMode::DarkPages, "Dark pages"),
+                    ] {
+                        if ui
+                            .selectable_value(&mut draft.page_mode, mode, label)
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+
+                if changed {
+                    outcome = Outcome::Settings(*draft);
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
             }
         });
 

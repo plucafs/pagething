@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.37"
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", tag = "v0.14.0" }
 rbook = { version = "0.7", default-features = false, features = ["prelude"] }
 htmd = "0.5"
 pulldown-cmark = "0.13"

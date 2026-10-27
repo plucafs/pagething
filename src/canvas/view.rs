@@ -1,6 +1,5 @@
 use eframe::egui::{
-    self, Color32, Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Rect, Response,
-    Vec2,
+    self, Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Rect, Response, Vec2,
 };
 
 const MIN_ZOOM: f32 = 0.1;
@@ -85,5 +84,3 @@ impl View {
         }
     }
 }
-
-pub const PAPER_BG: Color32 = Color32::from_gray(250);

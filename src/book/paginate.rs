@@ -83,11 +83,25 @@ pub fn paginate(blocks: &[BlockMetrics], content_height: f32, has_cover: bool) -
                 take += 1;
             }
 
+            let forced = take == 0;
             if take == 0 {
                 if items.is_empty() && y <= 0.0 {
                     take = 1;
                     used = segs[seg];
                 } else {
+                    finish_page(&mut items, &mut pages);
+                    y = 0.0;
+                    continue;
+                }
+            }
+
+            if !forced {
+                let after = seg + take;
+                if segs.len() - after == 1 && used + segs[after] <= avail {
+                    used += segs[after];
+                    take += 1;
+                }
+                if take == 1 && segs.len() - seg > 1 && !items.is_empty() {
                     finish_page(&mut items, &mut pages);
                     y = 0.0;
                     continue;
@@ -191,6 +205,45 @@ mod tests {
         let pages = paginate(&blocks, 500.0, false);
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].items[0].row_end, 1);
+    }
+
+    #[test]
+    fn widow_pulls_final_row_onto_previous_page_when_it_fits() {
+        let blocks = [rows(0.0, vec![80.0, 80.0, 80.0, 80.0, 70.0])];
+        let pages = paginate(&blocks, 400.0, false);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].items[0].row_end, 5);
+    }
+
+    #[test]
+    fn widow_left_when_final_row_does_not_fit() {
+        let blocks = [rows(0.0, vec![100.0; 3])];
+        let pages = paginate(&blocks, 250.0, false);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].items[0].row_end, 2);
+        assert_eq!(pages[1].items[0].row_start, 2);
+        assert_eq!(pages[1].items[0].row_end, 3);
+    }
+
+    #[test]
+    fn orphan_pushes_single_row_to_next_page() {
+        let blocks = [solid(0.0, 300.0), rows(0.0, vec![150.0; 3])];
+        let pages = paginate(&blocks, 500.0, false);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].items.len(), 1);
+        assert_eq!(pages[0].items[0].block, 0);
+        assert_eq!(pages[1].items.len(), 1);
+        assert_eq!(pages[1].items[0].block, 1);
+        assert_eq!(pages[1].items[0].row_end - pages[1].items[0].row_start, 3);
+    }
+
+    #[test]
+    fn forced_single_row_still_places_oversized_segment() {
+        let blocks = [rows(0.0, vec![600.0, 100.0])];
+        let pages = paginate(&blocks, 500.0, false);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].items[0].row_end, 1);
+        assert_eq!(pages[1].items[0].row_start, 1);
     }
 
     #[test]

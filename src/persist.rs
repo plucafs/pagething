@@ -28,17 +28,67 @@ fn default_columns() -> usize {
     crate::canvas::grid::DEFAULT_COLUMNS
 }
 
+pub const MIN_MARGIN: f32 = 16.0;
+pub const MAX_MARGIN: f32 = 160.0;
+pub const MIN_UI_SCALE: f32 = 0.5;
+pub const MAX_UI_SCALE: f32 = 3.0;
+
+fn default_margin() -> f32 {
+    48.0
+}
+
+fn default_ui_scale() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePref {
+    Light,
+    Dark,
+    #[default]
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PageMode {
+    #[default]
+    Paper,
+    DarkPages,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default = "default_columns")]
     pub columns: usize,
+    #[serde(default = "default_margin")]
+    pub margin: f32,
+    #[serde(default)]
+    pub theme: ThemePref,
+    #[serde(default)]
+    pub page_mode: PageMode,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             columns: default_columns(),
+            margin: default_margin(),
+            theme: ThemePref::default(),
+            page_mode: PageMode::default(),
+            ui_scale: default_ui_scale(),
         }
+    }
+}
+
+impl Settings {
+    fn clamp(&mut self) {
+        self.columns = self.columns.clamp(1, crate::features::dialogs::MAX_COLUMNS);
+        self.margin = self.margin.clamp(MIN_MARGIN, MAX_MARGIN);
+        self.ui_scale = self.ui_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
     }
 }
 
@@ -57,10 +107,11 @@ impl SettingsStore {
     }
 
     pub fn load_from(path: PathBuf) -> Self {
-        let settings = std::fs::read_to_string(&path)
+        let mut settings: Settings = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        settings.clamp();
         Self { path, settings }
     }
 
@@ -68,8 +119,9 @@ impl SettingsStore {
         self.settings
     }
 
-    pub fn set_columns(&mut self, columns: usize) {
-        self.settings.columns = columns;
+    pub fn update(&mut self, f: impl FnOnce(&mut Settings)) {
+        f(&mut self.settings);
+        self.settings.clamp();
         self.save();
     }
 
@@ -160,13 +212,74 @@ mod tests {
         let path = dir.join("settings.json");
 
         let mut store = SettingsStore::load_from(path.clone());
-        assert_eq!(store.settings().columns, 4);
-        store.set_columns(6);
+        assert_eq!(store.settings(), Settings::default());
+        store.update(|s| {
+            s.columns = 6;
+            s.margin = 72.0;
+            s.theme = ThemePref::Dark;
+            s.page_mode = PageMode::DarkPages;
+            s.ui_scale = 1.5;
+        });
 
         let reloaded = SettingsStore::load_from(path.clone());
-        assert_eq!(reloaded.settings().columns, 6);
+        let s = reloaded.settings();
+        assert_eq!(s.columns, 6);
+        assert_eq!(s.margin, 72.0);
+        assert_eq!(s.theme, ThemePref::Dark);
+        assert_eq!(s.page_mode, PageMode::DarkPages);
+        assert_eq!(s.ui_scale, 1.5);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_settings_json_loads_with_defaults() {
+        let dir = std::env::temp_dir().join(format!("pagething-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"columns":6}"#).unwrap();
+
+        let s = SettingsStore::load_from(path).settings();
+        assert_eq!(
+            s,
+            Settings {
+                columns: 6,
+                margin: 48.0,
+                ..Settings::default()
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_clamp_out_of_range_values() {
+        let dir = std::env::temp_dir().join(format!("pagething-clamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"columns":0,"margin":999.0,"ui_scale":99.0}"#).unwrap();
+
+        let store = SettingsStore::load_from(path);
+        let s = store.settings();
+        assert_eq!(s.columns, 1);
+        assert_eq!(s.margin, MAX_MARGIN);
+        assert_eq!(s.ui_scale, MAX_UI_SCALE);
+        assert_eq!(s.theme, ThemePref::System);
+        assert_eq!(s.page_mode, PageMode::Paper);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_and_page_mode_serialize_snake_case() {
+        let json = serde_json::to_string(&Settings {
+            theme: ThemePref::Light,
+            page_mode: PageMode::DarkPages,
+            ..Settings::default()
+        })
+        .unwrap();
+        assert!(json.contains("\"theme\":\"light\""));
+        assert!(json.contains("\"page_mode\":\"dark_pages\""));
     }
 
     #[test]
