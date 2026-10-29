@@ -84,12 +84,12 @@ src/
 2. **Book pipeline** — `book/*`: open EPUB, XHTML→MD→blocks, unit-test on a sample book. **DONE**
 3. **Open + pagination + page rendering** — menu bar (File/Open/Recent/Quit), Ctrl+O + rfd, async load with "Loading…", block-measure packing, real content on pages, cover page 1, DejaVu bold, images. **DONE**
 4. **Navigation** — Ctrl+G jump (center, keep zoom), Ctrl+L columns reflow (1–16, live), columns persisted in settings.json. **DONE**
-5. **Search** — Ctrl+F dialog, results list, jump, yellow highlight. *~1 day*
-6. **Selection** — hit-test drag, Ctrl+C copy, single-page clamp. *~1 day*
-7. **Position/columns persistence** — restore last book viewport position, columns, margins across sessions (recents already persist). *~half day*
-8. **Settings + theming** — Ctrl+, margins + Light/Dark/System + paper/dark page mode. *~half day*
+5. **Search** — Ctrl+F dialog, results list, jump, yellow highlight. **DONE**
+6. **Selection** — hit-test drag, Ctrl+C copy, single-page clamp. **DONE**
+7. **Position/columns persistence** — restore last book viewport position, columns, margins across sessions (recents already persist). **DONE**
+8. **Settings + theming** — Ctrl+, margins + Light/Dark/System + paper/dark page mode. **DONE**
 
-Total remaining: roughly 3–4 days; the schedule risk (milestone 3) is behind us.
+All V1 milestones done.
 
 ## Verification
 

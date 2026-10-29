@@ -1,5 +1,6 @@
 use eframe::egui::{self, Align2, Key, Modifiers};
 
+use crate::features::search::Hit;
 use crate::persist::{
     MAX_MARGIN, MAX_UI_SCALE, MIN_MARGIN, MIN_UI_SCALE, PageMode, Settings, ThemePref,
 };
@@ -11,15 +12,19 @@ pub enum Dialog {
     Jump { input: String },
     Columns { input: String },
     Settings { draft: Settings },
+    Search { input: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Keep,
     Close,
     Jumped(usize),
     Columns(usize),
     Settings(Settings),
+    Search(String),
+    SearchPrev,
+    SearchJump(usize),
 }
 
 pub fn parse_jump(input: &str, page_count: usize) -> Option<usize> {
@@ -35,19 +40,31 @@ pub fn parse_columns(input: &str) -> Option<usize> {
     Some(n.clamp(1, MAX_COLUMNS))
 }
 
-pub fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, page_count: usize) -> Outcome {
+pub fn dialog_ui(
+    ctx: &egui::Context,
+    dialog: &mut Dialog,
+    page_count: usize,
+    hits: &[Hit],
+) -> Outcome {
     let mut outcome = Outcome::Keep;
 
     let title = match dialog {
         Dialog::Jump { .. } => "Jump to page",
         Dialog::Columns { .. } => "Columns",
         Dialog::Settings { .. } => "Settings",
+        Dialog::Search { .. } => "Search",
+    };
+    let anchor = match dialog {
+        Dialog::Search { .. } => (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0)),
+        _ => (Align2::CENTER_CENTER, egui::Vec2::ZERO),
     };
 
+    let mut open = true;
     egui::Window::new(title)
-        .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .anchor(anchor.0, anchor.1)
         .collapsible(false)
         .resizable(false)
+        .open(&mut open)
         .show(ctx, |ui| match dialog {
             Dialog::Jump { input } => {
                 let edit = ui.add(
@@ -143,7 +160,46 @@ pub fn dialog_ui(ctx: &egui::Context, dialog: &mut Dialog, page_count: usize) ->
                     outcome = Outcome::Close;
                 }
             }
+            Dialog::Search { input } => {
+                let edit = ui.add(
+                    egui::TextEdit::singleline(input)
+                        .hint_text("Search book")
+                        .desired_width(240.0),
+                );
+                edit.request_focus();
+
+                let enter = ui.input(|i| i.key_pressed(Key::Enter));
+                let shift = ui.input(|i| i.modifiers.shift);
+                if enter && !input.trim().is_empty() {
+                    outcome = if shift {
+                        Outcome::SearchPrev
+                    } else {
+                        Outcome::Search(input.clone())
+                    };
+                } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+
+                if !hits.is_empty() {
+                    ui.separator();
+                    ui.label(format!("{} matches — Enter/Shift+Enter cycles", hits.len()));
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for (index, hit) in hits.iter().enumerate() {
+                                let label = format!("p.{}  {}", hit.page + 1, hit.snippet);
+                                if ui.button(label).clicked() {
+                                    outcome = Outcome::SearchJump(index);
+                                }
+                            }
+                        });
+                }
+            }
         });
+
+    if !open {
+        outcome = Outcome::Close;
+    }
 
     outcome
 }

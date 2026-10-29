@@ -5,8 +5,13 @@ use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, Str
 use crate::book::paginate::{Page, PageKind};
 use crate::canvas::grid::PAGE_SIZE;
 use crate::canvas::view::View;
+use crate::features::selection;
 use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, Margins, RULE_HEIGHT};
 use crate::render::theme::PageColors;
+
+pub const SEARCH_HL: Color32 = Color32::from_rgba_premultiplied(140, 112, 33, 140);
+pub const SEARCH_CURRENT_HL: Color32 = Color32::from_rgba_premultiplied(190, 70, 15, 180);
+pub const SELECTION_HL: Color32 = Color32::from_rgba_premultiplied(26, 60, 110, 110);
 
 pub struct PageView<'a> {
     pub page: &'a Page,
@@ -16,6 +21,8 @@ pub struct PageView<'a> {
     pub font_uv: Vec2,
     pub margins: Margins,
     pub colors: PageColors,
+    /// `(item index, char a, char b, color)` painted under the text.
+    pub highlights: &'a [(usize, usize, usize, Color32)],
 }
 
 pub fn paint_page(
@@ -35,6 +42,7 @@ pub fn paint_page(
     );
 
     let zoom = view.zoom;
+    paint_highlights(painter, screen_rect, pv, zoom);
 
     if pv.page.kind == PageKind::Cover {
         if let Some(cover) = pv.cover {
@@ -114,6 +122,34 @@ pub fn paint_page(
         pv.margins.bottom,
         pv.colors.page_number,
     );
+}
+
+/// Highlight rects under the text: `(item, char a, char b, color)` spans.
+fn paint_highlights(painter: &Painter, screen_rect: Rect, pv: &PageView<'_>, zoom: f32) {
+    for &(item_index, a, b, color) in pv.highlights {
+        let Some(item) = pv.page.items.get(item_index) else {
+            continue;
+        };
+        let Some(block) = pv.laid.get(item.block) else {
+            continue;
+        };
+        let LaidKind::Text { galley, indent, .. } = &block.kind else {
+            continue;
+        };
+        let Some(row_first) = galley.rows.get(item.row_start) else {
+            continue;
+        };
+        let base = row_first.pos;
+        let origin =
+            screen_rect.min + Vec2::new(pv.margins.left + *indent, pv.margins.top + item.y) * zoom;
+        for rect in selection::span_rects(galley, item.row_start, item.row_end, a, b) {
+            let min = origin + (rect.min.to_vec2() - base.to_vec2()) * zoom;
+            let max = origin + (rect.max.to_vec2() - base.to_vec2()) * zoom;
+            if max.x > min.x && max.y > min.y {
+                painter.rect_filled(Rect::from_min_max(min, max), 0.0, color);
+            }
+        }
+    }
 }
 
 /// Screen rect of a piece (a block's rows `[row_start..row_end]`) painted at
@@ -238,7 +274,7 @@ fn paint_page_number(
         pos,
         Align2::CENTER_BOTTOM,
         number.to_string(),
-        crate::render::fonts::book(11.0 * zoom),
+        crate::render::fonts::book(16.0 * zoom),
         color,
     );
 }

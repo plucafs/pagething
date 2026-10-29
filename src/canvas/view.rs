@@ -52,6 +52,12 @@ impl View {
             self.pan += response.drag_delta();
         }
 
+        // Scroll/zoom only when the canvas is the top widget under the pointer:
+        // a modal (or menu) covering the pointer must keep its own scrolling.
+        if !response.hovered() {
+            return;
+        }
+
         let pointer_pos = ctx
             .pointer_latest_pos()
             .filter(|p| canvas_rect.contains(*p));

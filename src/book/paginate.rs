@@ -12,10 +12,20 @@ pub struct PageItem {
     pub y: f32,
 }
 
+/// A block's text inside its page's `plain_text`, in char offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSegment {
+    pub block: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Page {
     pub kind: PageKind,
     pub items: Vec<PageItem>,
+    pub plain_text: String,
+    pub segments: Vec<TextSegment>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +51,8 @@ pub fn paginate(blocks: &[BlockMetrics], content_height: f32, has_cover: bool) -
         pages.push(Page {
             kind: PageKind::Cover,
             items: Vec::new(),
+            plain_text: String::new(),
+            segments: Vec::new(),
         });
     }
 
@@ -51,6 +63,8 @@ pub fn paginate(blocks: &[BlockMetrics], content_height: f32, has_cover: bool) -
         pages.push(Page {
             kind: PageKind::Content,
             items: std::mem::take(items),
+            plain_text: String::new(),
+            segments: Vec::new(),
         });
     };
 

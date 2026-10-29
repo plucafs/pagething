@@ -3,13 +3,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use eframe::egui::{self, Color32, Key, Modifiers, ViewportCommand};
+use eframe::egui::{self, Color32, Key, Modifiers, PointerButton, Response, ViewportCommand};
 
 use crate::book::blocks::Block;
 use crate::book::paginate;
 use crate::book::prepare::{self, PreparedBook};
 use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
+use crate::features::search::{self, Hit};
+use crate::features::selection::{self, Selection};
 use crate::persist::{Settings, SettingsStore, ThemePref, ViewState, ViewStore};
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
@@ -49,6 +51,11 @@ pub struct PagethingApp {
     dialog: Option<Dialog>,
     pending_jump: Option<usize>,
     text_rendering: fastframe_text::TextRendering,
+    selection: Option<Selection>,
+    selection_drag: bool,
+    search_hits: Vec<Hit>,
+    search_query: String,
+    search_index: usize,
 }
 
 impl PagethingApp {
@@ -71,6 +78,11 @@ impl PagethingApp {
             dialog: None,
             pending_jump: None,
             text_rendering,
+            selection: None,
+            selection_drag: false,
+            search_hits: Vec::new(),
+            search_query: String::new(),
+            search_index: 0,
         };
         if let Some(latest) = app.recents.first().cloned()
             && latest.exists()
@@ -83,6 +95,11 @@ impl PagethingApp {
     fn open_path(&mut self, path: PathBuf) {
         self.stash_view();
         self.display_cache.clear();
+        self.selection = None;
+        self.selection_drag = false;
+        self.search_hits.clear();
+        self.search_query.clear();
+        self.search_index = 0;
         self.view = self
             .view_store
             .get(&path)
@@ -146,7 +163,8 @@ impl PagethingApp {
             &PageColors::for_mode(settings.page_mode),
         );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
-        let pages = paginate::paginate(&metrics, height, cover.is_some());
+        let mut pages = paginate::paginate(&metrics, height, cover.is_some());
+        layout::attach_page_texts(&mut pages, &laid);
 
         LoadedBook {
             title: raw.title,
@@ -199,7 +217,13 @@ impl PagethingApp {
         );
         let metrics: Vec<_> = book.laid.iter().map(|b| b.metrics()).collect();
         book.pages = paginate::paginate(&metrics, height, book.cover.is_some());
+        layout::attach_page_texts(&mut book.pages, &book.laid);
         self.display_cache.clear();
+        self.selection = None;
+        self.selection_drag = false;
+        self.search_hits.clear();
+        self.search_query.clear();
+        self.search_index = 0;
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -235,6 +259,21 @@ impl PagethingApp {
             }
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
                 self.pending_jump = Some(book.pages.len());
+            }
+        }
+        if dialogs::consume_shortcut(ctx, Key::F) {
+            self.dialog = Some(Dialog::Search {
+                input: String::new(),
+            });
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::C))
+            && let Some(sel) = &self.selection
+            && let Phase::Ready(book) = &self.phase
+            && let Some(page) = book.pages.get(sel.page)
+        {
+            let text = selection::copy_text(page, &book.laid, sel);
+            if !text.is_empty() {
+                ctx.copy_text(text);
             }
         }
         self.view.handle_shortcuts(ctx);
@@ -334,6 +373,80 @@ impl PagethingApp {
         self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
     }
 
+    /// Enter (forward) / Shift+Enter (backward): re-search when the query
+    /// changed, otherwise advance the index with wrap-around, then jump.
+    fn goto_hit(&mut self, forward: bool, query: &str, canvas_rect: egui::Rect) {
+        if query != self.search_query {
+            if let Phase::Ready(book) = &self.phase {
+                self.search_hits = search::search(&book.pages, query);
+                self.search_query = query.to_owned();
+                self.search_index = 0;
+            }
+        } else if !self.search_hits.is_empty() {
+            let len = self.search_hits.len();
+            self.search_index = if forward {
+                (self.search_index + 1) % len
+            } else {
+                (self.search_index + len - 1) % len
+            };
+        }
+        if let Some(hit) = self.search_hits.get(self.search_index) {
+            let page = hit.page + 1;
+            self.jump_to_page(page, canvas_rect);
+        }
+    }
+
+    /// Screen position → `(page index, piece char loc)` over visible text.
+    fn loc_at(&self, canvas_rect: egui::Rect, pos: egui::Pos2) -> Option<(usize, selection::Loc)> {
+        let Phase::Ready(book) = &self.phase else {
+            return None;
+        };
+        if !canvas_rect.contains(pos) {
+            return None;
+        }
+        let margins = Margins::uniform(self.settings.settings().margin);
+        let world = self.view.to_world(pos);
+        for (i, page) in book.pages.iter().enumerate() {
+            let world_rect = grid::page_rect(i, self.columns, grid::GAP);
+            if !world_rect.contains(world.to_pos2()) {
+                continue;
+            }
+            let page_pos = world - world_rect.min.to_vec2();
+            if let Some(loc) = selection::hit_test(page, &book.laid, margins, page_pos) {
+                return Some((i, loc));
+            }
+        }
+        None
+    }
+
+    fn handle_selection_input(&mut self, canvas_rect: egui::Rect, response: &Response) {
+        if response.drag_started_by(PointerButton::Primary) {
+            let hit = response
+                .interact_pointer_pos()
+                .and_then(|pos| self.loc_at(canvas_rect, pos));
+            match hit {
+                Some((page, loc)) => {
+                    self.selection = Some(Selection::single(page, loc));
+                    self.selection_drag = true;
+                }
+                None => {
+                    self.selection = None;
+                    self.selection_drag = false;
+                }
+            }
+        } else if response.dragged_by(PointerButton::Primary) && self.selection_drag {
+            if let Some(pos) = response.interact_pointer_pos()
+                && let Some((page, loc)) = self.loc_at(canvas_rect, pos)
+                && let Some(sel) = &mut self.selection
+                && sel.page == page
+            {
+                sel.cursor = loc;
+            }
+        } else if response.drag_stopped_by(PointerButton::Primary) {
+            self.selection_drag = false;
+        }
+    }
+
     fn apply_dialog(&mut self, canvas_rect: egui::Rect, ctx: &egui::Context) {
         let Some(dialog) = &mut self.dialog else {
             return;
@@ -342,7 +455,11 @@ impl PagethingApp {
             Phase::Ready(book) => book.pages.len(),
             _ => 0,
         };
-        let outcome = dialogs::dialog_ui(ctx, dialog, page_count);
+        let search_input = match dialog {
+            Dialog::Search { input } => input.clone(),
+            _ => String::new(),
+        };
+        let outcome = dialogs::dialog_ui(ctx, dialog, page_count, &self.search_hits);
         match outcome {
             Outcome::Keep => {}
             Outcome::Close => self.dialog = None,
@@ -354,6 +471,15 @@ impl PagethingApp {
                 self.dialog = None;
                 self.columns = columns;
                 self.settings.update(|s| s.columns = columns);
+            }
+            Outcome::Search(query) => self.goto_hit(true, &query, canvas_rect),
+            Outcome::SearchPrev => self.goto_hit(false, &search_input, canvas_rect),
+            Outcome::SearchJump(index) => {
+                if let Some(hit) = self.search_hits.get(index) {
+                    self.search_index = index;
+                    let page = hit.page + 1;
+                    self.jump_to_page(page, canvas_rect);
+                }
             }
             Outcome::Settings(changed) => {
                 let prev = self.settings.settings();
@@ -379,6 +505,7 @@ impl PagethingApp {
         if let Some(page) = self.pending_jump.take() {
             self.jump_to_page(page, canvas_rect);
         }
+        self.handle_selection_input(canvas_rect, &response);
 
         let painter = ui.painter().with_clip_rect(canvas_rect);
         painter.rect_filled(canvas_rect, 0.0, theme::canvas_bg(ui.ctx().theme()));
@@ -428,6 +555,30 @@ impl PagethingApp {
                     if !canvas_rect.intersects(screen_rect) {
                         continue;
                     }
+                    let mut highlights: Vec<(usize, usize, usize, Color32)> = Vec::new();
+                    for (hi, hit) in self.search_hits.iter().enumerate() {
+                        if hit.page == i {
+                            let color = if hi == self.search_index {
+                                page_view::SEARCH_CURRENT_HL
+                            } else {
+                                page_view::SEARCH_HL
+                            };
+                            highlights.extend(
+                                selection::piece_ranges(page, hit.start, hit.end)
+                                    .into_iter()
+                                    .map(|(ii, a, b)| (ii, a, b, color)),
+                            );
+                        }
+                    }
+                    if let Some(sel) = &self.selection
+                        && sel.page == i
+                    {
+                        highlights.extend(
+                            selection::selection_spans(page, sel)
+                                .into_iter()
+                                .map(|(ii, a, b)| (ii, a, b, page_view::SELECTION_HL)),
+                        );
+                    }
                     let pv = PageView {
                         page,
                         laid: &book.laid,
@@ -436,6 +587,7 @@ impl PagethingApp {
                         font_uv,
                         margins,
                         colors,
+                        highlights: &highlights,
                     };
                     page_view::paint_page(
                         &painter,

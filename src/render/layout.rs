@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 
 use crate::book::blocks::{Block, Span};
-use crate::book::paginate::BlockMetrics;
+use crate::book::paginate::{self, BlockMetrics};
 use crate::canvas::grid::PAGE_SIZE;
 use crate::render::fonts;
 use crate::render::theme::PageColors;
@@ -341,6 +341,38 @@ pub fn layout_blocks(
     out
 }
 
+/// Fill each page's `plain_text` and block segments from the laid galleys.
+/// Char offsets; blocks joined with a newline.
+pub fn attach_page_texts(pages: &mut [paginate::Page], laid: &[LaidBlock]) {
+    for page in pages.iter_mut() {
+        let mut text = String::new();
+        let mut chars = 0usize;
+        let mut segments = Vec::new();
+        for item in &page.items {
+            let Some(block) = laid.get(item.block) else {
+                continue;
+            };
+            let LaidKind::Text { galley, .. } = &block.kind else {
+                continue;
+            };
+            if !text.is_empty() {
+                text.push('\n');
+                chars += 1;
+            }
+            let start = chars;
+            text.push_str(galley.text());
+            chars += galley.text().chars().count();
+            segments.push(paginate::TextSegment {
+                block: item.block,
+                start,
+                end: chars,
+            });
+        }
+        page.plain_text = text;
+        page.segments = segments;
+    }
+}
+
 /// Rebuild a layout job at `scale` — every size-bearing field grows linearly,
 /// so line breaks land where the zoom=1 layout put them (modulo float noise).
 pub fn scaled_job(job: &LayoutJob, scale: f32) -> LayoutJob {
@@ -648,5 +680,50 @@ mod tests {
         });
         output.textures_delta.clear();
         assert_eq!(checked, 20);
+    }
+
+    #[test]
+    fn search_hits_map_to_piece_ranges_on_real_book() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/books/pg1342.epub");
+        let raw = prepare(&path).expect("prepare pg1342");
+
+        let ctx = Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+
+        let margins = DEFAULT_MARGINS;
+        let colors = PageColors::PAPER;
+        let mut pages = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let laid = layout_blocks(
+                ui.ctx(),
+                &raw.blocks,
+                &HashMap::new(),
+                content_width(&margins),
+                content_height(&margins),
+                &colors,
+            );
+            let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
+            pages = paginate::paginate(&metrics, content_height(&margins), raw.cover.is_some());
+            attach_page_texts(&mut pages, &laid);
+
+            let hits = crate::features::search::search(&pages, "the");
+            assert!(!hits.is_empty(), "pg1342 must contain 'the'");
+            let mut mapped = 0usize;
+            for hit in &hits {
+                let ranges =
+                    crate::features::selection::piece_ranges(&pages[hit.page], hit.start, hit.end);
+                assert!(
+                    !ranges.is_empty(),
+                    "hit at page {} chars {}..{} maps to no piece (segments: {:?})",
+                    hit.page,
+                    hit.start,
+                    hit.end,
+                    pages[hit.page].segments
+                );
+                mapped += ranges.len();
+            }
+            assert_eq!(mapped, hits.len());
+        });
+        output.textures_delta.clear();
     }
 }
