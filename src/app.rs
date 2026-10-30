@@ -12,7 +12,9 @@ use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
 use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
-use crate::persist::{Settings, SettingsStore, ThemePref, ViewState, ViewStore};
+use crate::persist::{
+    BookmarkStore, Postit, PostitStore, Settings, SettingsStore, ThemePref, ViewState, ViewStore,
+};
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
 use crate::render::theme::{self, PageColors};
@@ -46,12 +48,18 @@ pub struct PagethingApp {
     want_open: bool,
     display_cache: DisplayCache,
     view_store: ViewStore,
+    postit_store: PostitStore,
+    bookmark_store: BookmarkStore,
+    postits: Vec<Postit>,
+    bookmarks: Vec<usize>,
     settings: SettingsStore,
     current_book: Option<PathBuf>,
     dialog: Option<Dialog>,
     pending_jump: Option<usize>,
     pending_navigation: Option<bool>,
     pending_selection_search: Option<String>,
+    pending_postit: bool,
+    pending_bookmark: bool,
     text_rendering: fastframe_text::TextRendering,
     selection: Option<Selection>,
     selection_drag: bool,
@@ -75,12 +83,18 @@ impl PagethingApp {
             want_open: false,
             display_cache: DisplayCache::default(),
             view_store: ViewStore::load(),
+            postit_store: PostitStore::load("postits.json"),
+            bookmark_store: BookmarkStore::load("bookmarks.json"),
+            postits: Vec::new(),
+            bookmarks: Vec::new(),
             settings,
             current_book: None,
             dialog: None,
             pending_jump: None,
             pending_navigation: None,
             pending_selection_search: None,
+            pending_postit: false,
+            pending_bookmark: false,
             text_rendering,
             selection: None,
             selection_drag: false,
@@ -104,6 +118,8 @@ impl PagethingApp {
         self.search_hits.clear();
         self.search_query.clear();
         self.search_index = 0;
+        self.postits = self.postit_store.get(&path).to_vec();
+        self.bookmarks = self.bookmark_store.get(&path).to_vec();
         self.view = self
             .view_store
             .get(&path)
@@ -273,6 +289,12 @@ impl PagethingApp {
                 input: String::new(),
             });
         }
+        if self.dialog.is_none()
+            && matches!(self.phase, Phase::Ready(_))
+            && dialogs::consume_shortcut(ctx, Key::V)
+        {
+            self.dialog = Some(Dialog::Bookmarks);
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::C))
             && let Some(sel) = &self.selection
             && let Phase::Ready(book) = &self.phase
@@ -285,6 +307,14 @@ impl PagethingApp {
         }
 
         if self.dialog.is_none() && !ctx.any_popup_open() {
+            if matches!(self.phase, Phase::Ready(_)) {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::A)) {
+                    self.pending_postit = true;
+                }
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::V)) {
+                    self.pending_bookmark = true;
+                }
+            }
             let has_selection = self.selection.is_some_and(|sel| !sel.is_empty());
             if has_selection
                 && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C))
@@ -461,9 +491,23 @@ impl PagethingApp {
         if page == 0 {
             return;
         }
-        let world_rect = grid::page_rect(page - 1, self.columns, grid::GAP);
+        let world_rect = grid::page_rect(page - 1, self.columns, self.settings.settings().page_gap);
         let world_center = world_rect.center();
         self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
+    }
+
+    fn current_page(&self, canvas_rect: egui::Rect) -> Option<usize> {
+        let Phase::Ready(book) = &self.phase else {
+            return None;
+        };
+        let center = self.view.to_world(canvas_rect.center()).to_pos2();
+        grid::page_index_at_or_near(
+            center,
+            self.columns,
+            self.settings.settings().page_gap,
+            book.pages.len(),
+        )
+        .map(|index| index + 1)
     }
 
     fn navigate_page(&mut self, forward: bool, canvas_rect: egui::Rect) {
@@ -472,9 +516,12 @@ impl PagethingApp {
         };
         let page_count = book.pages.len();
         let center = self.view.to_world(canvas_rect.center()).to_pos2();
-        let Some(current) =
-            grid::page_index_at_or_near(center, self.columns, grid::GAP, page_count)
-        else {
+        let Some(current) = grid::page_index_at_or_near(
+            center,
+            self.columns,
+            self.settings.settings().page_gap,
+            page_count,
+        ) else {
             return;
         };
         let Some(target) = grid::adjacent_page_index(current, page_count, forward) else {
@@ -527,7 +574,7 @@ impl PagethingApp {
         let margins = Margins::uniform(self.settings.settings().margin);
         let world = self.view.to_world(pos);
         for (i, page) in book.pages.iter().enumerate() {
-            let world_rect = grid::page_rect(i, self.columns, grid::GAP);
+            let world_rect = grid::page_rect(i, self.columns, self.settings.settings().page_gap);
             if !world_rect.contains(world.to_pos2()) {
                 continue;
             }
@@ -539,11 +586,19 @@ impl PagethingApp {
         None
     }
 
-    fn handle_selection_input(&mut self, canvas_rect: egui::Rect, response: &Response) {
+    fn handle_selection_input(
+        &mut self,
+        canvas_rect: egui::Rect,
+        response: &Response,
+        postit_rects: &[egui::Rect],
+    ) {
         if response.drag_started_by(PointerButton::Primary) {
-            let hit = response
-                .interact_pointer_pos()
-                .and_then(|pos| self.loc_at(canvas_rect, pos));
+            let pointer = response.interact_pointer_pos();
+            if pointer.is_some_and(|pos| postit_rects.iter().any(|rect| rect.contains(pos))) {
+                self.selection_drag = false;
+                return;
+            }
+            let hit = pointer.and_then(|pos| self.loc_at(canvas_rect, pos));
             match hit {
                 Some((page, loc)) => {
                     self.selection = Some(Selection::single(page, loc));
@@ -579,10 +634,18 @@ impl PagethingApp {
             Dialog::Search { input } => input.clone(),
             _ => String::new(),
         };
-        let outcome = dialogs::dialog_ui(ctx, dialog, page_count, &self.search_hits);
+        let outcome =
+            dialogs::dialog_ui(ctx, dialog, page_count, &self.search_hits, &self.bookmarks);
         match outcome {
             Outcome::Keep => {}
-            Outcome::Close => self.dialog = None,
+            Outcome::Close => {
+                if matches!(dialog, Dialog::Search { .. }) {
+                    self.search_hits.clear();
+                    self.search_query.clear();
+                    self.search_index = 0;
+                }
+                self.dialog = None;
+            }
             Outcome::Jumped(page) => {
                 self.dialog = None;
                 self.jump_to_page(page, canvas_rect);
@@ -601,8 +664,38 @@ impl PagethingApp {
                     self.jump_to_page(page, canvas_rect);
                 }
             }
+            Outcome::PostitSaved { page, index, text } => {
+                self.dialog = None;
+                let note = Postit { page, text };
+                if let Some(index) = index {
+                    if let Some(existing) = self.postits.get_mut(index) {
+                        *existing = note;
+                    }
+                } else {
+                    self.postits.push(note);
+                }
+                self.save_postits();
+            }
+            Outcome::PostitDeleted(index) => {
+                self.dialog = None;
+                if index < self.postits.len() {
+                    self.postits.remove(index);
+                    self.save_postits();
+                }
+            }
+            Outcome::BookmarkOpen(page) => {
+                self.dialog = None;
+                self.jump_to_page(page, canvas_rect);
+            }
+            Outcome::BookmarkDeleted(page) => {
+                self.bookmarks.retain(|&saved| saved != page);
+                self.save_bookmarks();
+            }
             Outcome::Settings(changed) => {
                 let prev = self.settings.settings();
+                let current_page = (changed.page_gap != prev.page_gap)
+                    .then(|| self.current_page(canvas_rect))
+                    .flatten();
                 self.settings.update(|s| *s = changed);
                 if changed.theme != prev.theme {
                     apply_theme_pref(ctx, changed.theme);
@@ -616,8 +709,43 @@ impl PagethingApp {
                 {
                     self.rebuild_ready_book(ctx);
                 }
+                if let Some(page) = current_page {
+                    let page_count = match &self.phase {
+                        Phase::Ready(book) => book.pages.len(),
+                        _ => 0,
+                    };
+                    if page_count > 0 {
+                        self.center_page(page.min(page_count), canvas_rect);
+                    }
+                }
             }
         }
+    }
+
+    fn save_postits(&mut self) {
+        let Some(book) = self.current_book.as_deref() else {
+            return;
+        };
+        self.postit_store.set(book, self.postits.clone());
+        self.postit_store.save();
+    }
+
+    fn save_bookmarks(&mut self) {
+        let Some(book) = self.current_book.as_deref() else {
+            return;
+        };
+        self.bookmark_store.set(book, self.bookmarks.clone());
+        self.bookmark_store.save();
+    }
+
+    fn toggle_bookmark(&mut self, page: usize) {
+        if let Some(index) = self.bookmarks.iter().position(|&saved| saved == page) {
+            self.bookmarks.remove(index);
+        } else {
+            self.bookmarks.push(page);
+            self.bookmarks.sort_unstable();
+        }
+        self.save_bookmarks();
     }
 
     fn paint_canvas(&mut self, ui: &mut egui::Ui) {
@@ -634,10 +762,24 @@ impl PagethingApp {
         if let Some(query) = self.pending_selection_search.take() {
             self.goto_hit(true, &query, canvas_rect, true);
         }
-        self.handle_selection_input(canvas_rect, &response);
+        if std::mem::take(&mut self.pending_postit)
+            && let Some(page) = self.current_page(canvas_rect)
+        {
+            self.dialog = Some(Dialog::Postit {
+                page,
+                index: None,
+                text: String::new(),
+            });
+        }
+        if std::mem::take(&mut self.pending_bookmark)
+            && let Some(page) = self.current_page(canvas_rect)
+        {
+            self.toggle_bookmark(page);
+        }
 
         let painter = ui.painter().with_clip_rect(canvas_rect);
         painter.rect_filled(canvas_rect, 0.0, theme::canvas_bg(ui.ctx().theme()));
+        let mut postit_rects = Vec::new();
 
         match &self.phase {
             Phase::Empty { error } => {
@@ -679,7 +821,7 @@ impl PagethingApp {
                 let margins = Margins::uniform(settings.margin);
                 let colors = PageColors::for_mode(settings.page_mode);
                 for (i, page) in book.pages.iter().enumerate() {
-                    let world_rect = grid::page_rect(i, self.columns, grid::GAP);
+                    let world_rect = grid::page_rect(i, self.columns, settings.page_gap);
                     let screen_rect = self.view.to_screen_rect(world_rect);
                     if !canvas_rect.intersects(screen_rect) {
                         continue;
@@ -726,9 +868,98 @@ impl PagethingApp {
                         screen_rect,
                         &pv,
                     );
+                    if self.bookmarks.contains(&(i + 1)) {
+                        let icon = egui::Rect::from_min_size(
+                            screen_rect.min + egui::vec2(12.0, 12.0),
+                            egui::vec2(14.0, 19.0),
+                        );
+                        let color = ctx.style_of(ctx.theme()).visuals.text_color();
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                icon.left_top(),
+                                icon.right_top(),
+                                icon.right_bottom(),
+                                egui::pos2(icon.center().x, icon.bottom() - 5.0),
+                                icon.left_bottom(),
+                            ],
+                            color,
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
+
+                let style = ctx.style_of(ctx.theme());
+                let visuals = &style.visuals;
+                let note_fill = visuals.window_fill;
+                let note_text = visuals.text_color();
+                let note_stroke = visuals.window_stroke();
+                let mut stack_y: HashMap<usize, f32> = HashMap::new();
+                for (index, note) in self.postits.iter().enumerate() {
+                    let Some(page_index) = note.page.checked_sub(1) else {
+                        continue;
+                    };
+                    if page_index >= book.pages.len() {
+                        continue;
+                    }
+                    let page_rect = grid::page_rect(page_index, self.columns, settings.page_gap);
+                    let zoom = self.view.zoom.max(0.01);
+                    let galley = ctx.fonts_mut(|fonts| {
+                        fonts.layout(
+                            note.text.clone(),
+                            crate::render::fonts::book(14.0 * zoom),
+                            note_text,
+                            144.0 * zoom,
+                        )
+                    });
+                    let height = (galley.size().y / zoom + 16.0).clamp(36.0, 240.0);
+                    let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 8.0);
+                    let world_rect = egui::Rect::from_min_size(
+                        egui::pos2(page_rect.max.x + 8.0, *y),
+                        egui::vec2(160.0, height),
+                    );
+                    *y += height + 8.0;
+                    let screen_rect = self.view.to_screen_rect(world_rect);
+                    if !canvas_rect.intersects(screen_rect) {
+                        continue;
+                    }
+                    let clipped_rect = screen_rect.intersect(canvas_rect);
+                    let response = ui.interact(
+                        clipped_rect,
+                        ui.id().with(("postit", index)),
+                        egui::Sense::click(),
+                    );
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    let clicked = response.clicked();
+                    response.on_hover_ui(|ui| {
+                        ui.label(
+                            egui::RichText::new(note.text.clone())
+                                .font(crate::render::fonts::book(14.0)),
+                        );
+                    });
+                    painter.rect_filled(screen_rect, 4.0, note_fill);
+                    painter.rect_stroke(screen_rect, 4.0, note_stroke, egui::StrokeKind::Inside);
+                    painter
+                        .with_clip_rect(screen_rect.shrink(8.0 * zoom))
+                        .galley(
+                            screen_rect.min + egui::vec2(8.0 * zoom, 8.0 * zoom),
+                            galley,
+                            note_text,
+                        );
+                    postit_rects.push(screen_rect);
+                    if clicked {
+                        self.dialog = Some(Dialog::Postit {
+                            page: note.page,
+                            index: Some(index),
+                            text: note.text.clone(),
+                        });
+                    }
                 }
             }
         }
+
+        self.handle_selection_input(canvas_rect, &response, &postit_rects);
 
         let ctx = ui.ctx().clone();
         self.apply_dialog(canvas_rect, &ctx);

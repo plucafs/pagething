@@ -2,18 +2,32 @@ use eframe::egui::{self, Align2, Key, Modifiers};
 
 use crate::features::search::Hit;
 use crate::persist::{
-    MAX_FONT_SIZE, MAX_MARGIN, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_UI_SCALE, PageMode,
-    Settings, ThemePref,
+    MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP,
+    MIN_UI_SCALE, PageMode, Settings, ThemePref,
 };
 
 pub const MAX_COLUMNS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub enum Dialog {
-    Jump { input: String },
-    Columns { input: String },
-    Settings { draft: Settings },
-    Search { input: String },
+    Jump {
+        input: String,
+    },
+    Columns {
+        input: String,
+    },
+    Settings {
+        draft: Settings,
+    },
+    Search {
+        input: String,
+    },
+    Postit {
+        page: usize,
+        index: Option<usize>,
+        text: String,
+    },
+    Bookmarks,
     Shortcuts,
     Help,
 }
@@ -28,6 +42,14 @@ pub enum Outcome {
     Search(String),
     SearchPrev,
     SearchJump(usize),
+    PostitSaved {
+        page: usize,
+        index: Option<usize>,
+        text: String,
+    },
+    PostitDeleted(usize),
+    BookmarkOpen(usize),
+    BookmarkDeleted(usize),
 }
 
 pub fn parse_jump(input: &str, page_count: usize) -> Option<usize> {
@@ -48,6 +70,7 @@ pub fn dialog_ui(
     dialog: &mut Dialog,
     page_count: usize,
     hits: &[Hit],
+    bookmarks: &[usize],
 ) -> Outcome {
     let mut outcome = Outcome::Keep;
 
@@ -56,11 +79,21 @@ pub fn dialog_ui(
         Dialog::Columns { .. } => "Columns",
         Dialog::Settings { .. } => "Settings",
         Dialog::Search { .. } => "Search",
+        Dialog::Postit { index, .. } => {
+            if index.is_some() {
+                "Edit post-it"
+            } else {
+                "New post-it"
+            }
+        }
+        Dialog::Bookmarks => "Bookmarks",
         Dialog::Shortcuts => "Shortcuts",
         Dialog::Help => "About pagething",
     };
     let anchor = match dialog {
-        Dialog::Search { .. } => (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0)),
+        Dialog::Search { .. } | Dialog::Bookmarks | Dialog::Postit { .. } => {
+            (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0))
+        }
         _ => (Align2::CENTER_CENTER, egui::Vec2::ZERO),
     };
 
@@ -115,6 +148,18 @@ pub fn dialog_ui(
                         .fixed_decimals(0),
                 );
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Page gap");
+                let gap = ui.add(
+                    egui::Slider::new(&mut draft.page_gap, MIN_PAGE_GAP..=MAX_PAGE_GAP)
+                        .step_by(4.0)
+                        .fixed_decimals(0)
+                        .suffix(" px"),
+                );
+                if gap.drag_stopped() || (gap.changed() && !gap.dragged()) {
                     changed = true;
                 }
 
@@ -212,6 +257,65 @@ pub fn dialog_ui(
                         });
                 }
             }
+            Dialog::Postit { page, index, text } => {
+                ui.label(format!("Page {page}"));
+                ui.add(
+                    egui::TextEdit::multiline(text)
+                        .font(crate::render::fonts::book(16.0))
+                        .desired_width(320.0)
+                        .desired_rows(6)
+                        .hint_text("Write a note…"),
+                )
+                .request_focus();
+
+                if ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.ctrl) {
+                    outcome = save_postit(*page, *index, text);
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        outcome = save_postit(*page, *index, text);
+                    }
+                    if let Some(index) = index
+                        && ui.button("Delete").clicked()
+                    {
+                        outcome = Outcome::PostitDeleted(*index);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        outcome = Outcome::Close;
+                    }
+                });
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::Bookmarks => {
+                let valid = bookmarks
+                    .iter()
+                    .copied()
+                    .filter(|&page| page > 0 && page <= page_count);
+                let mut any = false;
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for page in valid {
+                            any = true;
+                            ui.horizontal(|ui| {
+                                if ui.button(format!("Page {page}")).clicked() {
+                                    outcome = Outcome::BookmarkOpen(page);
+                                }
+                                if ui.small_button("x").clicked() {
+                                    outcome = Outcome::BookmarkDeleted(page);
+                                }
+                            });
+                        }
+                    });
+                if !any {
+                    ui.label("No bookmarks yet. Press v on a page to add one.");
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
             Dialog::Shortcuts => {
                 let keyboard = [
                     ("Ctrl+O", "Open EPUB"),
@@ -221,6 +325,9 @@ pub fn dialog_ui(
                     ("Ctrl+L", "Set columns"),
                     ("Ctrl+F", "Search the book"),
                     ("Ctrl+,", "Open settings"),
+                    ("a", "Add a post-it to the current page"),
+                    ("v", "Toggle a bookmark on the current page"),
+                    ("Ctrl+V", "Show bookmarks"),
                     ("Ctrl+0", "Reset view"),
                     ("Ctrl+C", "Copy selected text"),
                     ("c", "Copy selected text"),
@@ -288,6 +395,18 @@ pub fn dialog_ui(
     }
 
     outcome
+}
+
+fn save_postit(page: usize, index: Option<usize>, text: &str) -> Outcome {
+    if text.trim().is_empty() {
+        Outcome::Close
+    } else {
+        Outcome::PostitSaved {
+            page,
+            index,
+            text: text.to_owned(),
+        }
+    }
 }
 
 /// True when the shortcut should not fall through to other handlers.

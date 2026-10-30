@@ -1,7 +1,7 @@
 use eframe::egui::{Pos2, Rect, Vec2};
 
-pub const DEFAULT_COLUMNS: usize = 4;
-pub const GAP: f32 = 24.0;
+pub const DEFAULT_COLUMNS: usize = 5;
+pub const GAP: f32 = 128.0;
 
 pub const PAGE_SIZE: Vec2 = Vec2::new(600.0, 900.0);
 pub const CANVAS_MARGIN: Vec2 = Vec2::splat(48.0);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct ViewState {
@@ -34,9 +34,11 @@ pub const MIN_UI_SCALE: f32 = 0.5;
 pub const MAX_UI_SCALE: f32 = 3.0;
 pub const MIN_FONT_SIZE: f32 = 8.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
+pub const MIN_PAGE_GAP: f32 = 0.0;
+pub const MAX_PAGE_GAP: f32 = 200.0;
 
 fn default_margin() -> f32 {
-    48.0
+    96.0
 }
 
 fn default_ui_scale() -> f32 {
@@ -45,6 +47,10 @@ fn default_ui_scale() -> f32 {
 
 fn default_font_size() -> f32 {
     16.0
+}
+
+fn default_page_gap() -> f32 {
+    crate::canvas::grid::GAP
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -78,6 +84,8 @@ pub struct Settings {
     pub ui_scale: f32,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    #[serde(default = "default_page_gap")]
+    pub page_gap: f32,
 }
 
 impl Default for Settings {
@@ -89,6 +97,7 @@ impl Default for Settings {
             page_mode: PageMode::default(),
             ui_scale: default_ui_scale(),
             font_size: default_font_size(),
+            page_gap: default_page_gap(),
         }
     }
 }
@@ -99,6 +108,7 @@ impl Settings {
         self.margin = self.margin.clamp(MIN_MARGIN, MAX_MARGIN);
         self.ui_scale = self.ui_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
         self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        self.page_gap = self.page_gap.clamp(MIN_PAGE_GAP, MAX_PAGE_GAP);
     }
 }
 
@@ -185,6 +195,71 @@ impl ViewStore {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Postit {
+    pub page: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BookStore<T> {
+    #[serde(skip)]
+    path: PathBuf,
+    data: HashMap<String, Vec<T>>,
+}
+
+impl<T> Default for BookStore<T> {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            data: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Clone + Serialize + DeserializeOwned> BookStore<T> {
+    pub fn load(filename: &str) -> Self {
+        let path = dirs::config_dir()
+            .map(|d| d.join("pagething").join(filename))
+            .unwrap_or_default();
+        Self::load_from(path)
+    }
+
+    pub fn load_from(path: PathBuf) -> Self {
+        let data = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, data }
+    }
+
+    pub fn get(&self, book: &Path) -> &[T] {
+        self.data
+            .get(&book_key(book))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub fn set(&mut self, book: &Path, items: Vec<T>) {
+        self.data.insert(book_key(book), items);
+    }
+
+    pub fn save(&self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.data) {
+            let _ = std::fs::write(&self.path, json);
+        }
+    }
+}
+
+pub type PostitStore = BookStore<Postit>;
+pub type BookmarkStore = BookStore<usize>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +306,7 @@ mod tests {
             s.page_mode = PageMode::DarkPages;
             s.ui_scale = 1.5;
             s.font_size = 20.0;
+            s.page_gap = 80.0;
         });
 
         let reloaded = SettingsStore::load_from(path.clone());
@@ -241,6 +317,7 @@ mod tests {
         assert_eq!(s.page_mode, PageMode::DarkPages);
         assert_eq!(s.ui_scale, 1.5);
         assert_eq!(s.font_size, 20.0);
+        assert_eq!(s.page_gap, 80.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -272,7 +349,7 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(
             &path,
-            r#"{"columns":0,"margin":999.0,"ui_scale":99.0,"font_size":99.0}"#,
+            r#"{"columns":0,"margin":999.0,"ui_scale":99.0,"font_size":99.0,"page_gap":999.0}"#,
         )
         .unwrap();
 
@@ -282,6 +359,7 @@ mod tests {
         assert_eq!(s.margin, MAX_MARGIN);
         assert_eq!(s.ui_scale, MAX_UI_SCALE);
         assert_eq!(s.font_size, MAX_FONT_SIZE);
+        assert_eq!(s.page_gap, MAX_PAGE_GAP);
         assert_eq!(s.theme, ThemePref::System);
         assert_eq!(s.page_mode, PageMode::Paper);
 
@@ -310,6 +388,26 @@ mod tests {
         let store = SettingsStore::load_from(path);
         assert_eq!(store.settings(), Settings::default());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn book_store_roundtrips_notes_by_book() {
+        let dir = std::env::temp_dir().join(format!("pagething-notes-{}", std::process::id()));
+        let path = dir.join("postits.json");
+        let book = PathBuf::from("/tmp/notes-book.epub");
+        let note = Postit {
+            page: 3,
+            text: "remember this".to_owned(),
+        };
+
+        let mut store = PostitStore::load_from(path.clone());
+        store.set(&book, vec![note.clone()]);
+        store.save();
+
+        let reloaded = PostitStore::load_from(path);
+        assert_eq!(reloaded.get(&book), &[note]);
+        assert!(reloaded.get(Path::new("/tmp/another-book.epub")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
