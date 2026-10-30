@@ -162,6 +162,7 @@ impl PagethingApp {
             ctx,
             &raw.blocks,
             &textures,
+            settings.font_size,
             width,
             height,
             &PageColors::for_mode(settings.page_mode),
@@ -215,6 +216,7 @@ impl PagethingApp {
             ctx,
             &book.blocks,
             &book.textures,
+            settings.font_size,
             width,
             height,
             &PageColors::for_mode(settings.page_mode),
@@ -608,7 +610,10 @@ impl PagethingApp {
                 if changed.ui_scale != prev.ui_scale {
                     ctx.set_zoom_factor(changed.ui_scale);
                 }
-                if changed.margin != prev.margin || changed.page_mode != prev.page_mode {
+                if changed.margin != prev.margin
+                    || changed.page_mode != prev.page_mode
+                    || changed.font_size != prev.font_size
+                {
                     self.rebuild_ready_book(ctx);
                 }
             }

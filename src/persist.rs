@@ -32,6 +32,8 @@ pub const MIN_MARGIN: f32 = 16.0;
 pub const MAX_MARGIN: f32 = 160.0;
 pub const MIN_UI_SCALE: f32 = 0.5;
 pub const MAX_UI_SCALE: f32 = 3.0;
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 32.0;
 
 fn default_margin() -> f32 {
     48.0
@@ -39,6 +41,10 @@ fn default_margin() -> f32 {
 
 fn default_ui_scale() -> f32 {
     1.0
+}
+
+fn default_font_size() -> f32 {
+    16.0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -70,6 +76,8 @@ pub struct Settings {
     pub page_mode: PageMode,
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
 }
 
 impl Default for Settings {
@@ -80,6 +88,7 @@ impl Default for Settings {
             theme: ThemePref::default(),
             page_mode: PageMode::default(),
             ui_scale: default_ui_scale(),
+            font_size: default_font_size(),
         }
     }
 }
@@ -89,6 +98,7 @@ impl Settings {
         self.columns = self.columns.clamp(1, crate::features::dialogs::MAX_COLUMNS);
         self.margin = self.margin.clamp(MIN_MARGIN, MAX_MARGIN);
         self.ui_scale = self.ui_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
+        self.font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
     }
 }
 
@@ -213,12 +223,14 @@ mod tests {
 
         let mut store = SettingsStore::load_from(path.clone());
         assert_eq!(store.settings(), Settings::default());
+        assert_eq!(store.settings().font_size, 16.0);
         store.update(|s| {
             s.columns = 6;
             s.margin = 72.0;
             s.theme = ThemePref::Dark;
             s.page_mode = PageMode::DarkPages;
             s.ui_scale = 1.5;
+            s.font_size = 20.0;
         });
 
         let reloaded = SettingsStore::load_from(path.clone());
@@ -228,6 +240,7 @@ mod tests {
         assert_eq!(s.theme, ThemePref::Dark);
         assert_eq!(s.page_mode, PageMode::DarkPages);
         assert_eq!(s.ui_scale, 1.5);
+        assert_eq!(s.font_size, 20.0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -257,13 +270,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pagething-clamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        std::fs::write(&path, r#"{"columns":0,"margin":999.0,"ui_scale":99.0}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"columns":0,"margin":999.0,"ui_scale":99.0,"font_size":99.0}"#,
+        )
+        .unwrap();
 
         let store = SettingsStore::load_from(path);
         let s = store.settings();
         assert_eq!(s.columns, 1);
         assert_eq!(s.margin, MAX_MARGIN);
         assert_eq!(s.ui_scale, MAX_UI_SCALE);
+        assert_eq!(s.font_size, MAX_FONT_SIZE);
         assert_eq!(s.theme, ThemePref::System);
         assert_eq!(s.page_mode, PageMode::Paper);
 

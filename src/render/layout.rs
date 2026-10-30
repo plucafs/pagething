@@ -83,10 +83,8 @@ impl LaidBlock {
     }
 }
 
-const BODY_SIZE: f32 = 14.0;
-const BODY_LEADING: f32 = BODY_SIZE * 1.4;
+const BASE_BODY_SIZE: f32 = 14.0;
 const HEADING_LEADING: f32 = 1.25;
-const PARA_INDENT: f32 = BODY_SIZE * 2.0;
 
 fn heading_size(level: u8) -> f32 {
     match level {
@@ -233,6 +231,7 @@ pub fn layout_blocks(
     ctx: &Context,
     blocks: &[Block],
     images: &HashMap<String, Arc<TextureHandle>>,
+    body_size: f32,
     content_width: f32,
     content_height: f32,
     colors: &PageColors,
@@ -250,15 +249,15 @@ pub fn layout_blocks(
                 push_spans(
                     &mut job,
                     &spans,
-                    BODY_SIZE,
+                    body_size,
                     colors.body,
                     colors.code_bg,
-                    BODY_LEADING,
+                    body_size * 1.4,
                 );
                 if !fb.flush
                     && let Some(first) = job.sections.first_mut()
                 {
-                    first.leading_space += PARA_INDENT;
+                    first.leading_space += body_size * 2.0;
                 }
                 if job.text.is_empty() {
                     continue;
@@ -285,7 +284,7 @@ pub fn layout_blocks(
                 if level == 1 {
                     job.halign = egui::Align::Center;
                 }
-                let size = heading_size(level);
+                let size = heading_size(level) * body_size / BASE_BODY_SIZE;
                 push_spans(
                     &mut job,
                     &spans,
@@ -497,6 +496,7 @@ mod tests {
                 ui.ctx(),
                 &blocks,
                 &HashMap::new(),
+                16.0,
                 content_width(&margins),
                 content_height(&margins),
                 &colors,
@@ -514,16 +514,17 @@ mod tests {
         assert!(!jobs[0].justify);
         let h1_leading = jobs[0].sections[0].format.line_height.unwrap();
         assert!(
-            (h1_leading - heading_size(1) * HEADING_LEADING).abs() < 1e-3,
+            (h1_leading - heading_size(1) * 16.0 / BASE_BODY_SIZE * HEADING_LEADING).abs() < 1e-3,
             "headings get tighter leading ratio than body"
         );
 
         assert!(jobs[1].justify);
         assert_eq!(jobs[1].sections[0].leading_space, 0.0);
-        assert_eq!(jobs[1].sections[0].format.line_height, Some(BODY_LEADING));
+        assert_eq!(jobs[1].sections[0].format.line_height, Some(16.0 * 1.4));
+        assert_eq!(jobs[1].sections[0].format.font_id.size, 16.0);
 
         assert!(jobs[2].justify);
-        assert_eq!(jobs[2].sections[0].leading_space, PARA_INDENT);
+        assert_eq!(jobs[2].sections[0].leading_space, 16.0 * 2.0);
 
         assert_eq!(jobs[3].halign, egui::Align::LEFT);
 
@@ -553,6 +554,7 @@ mod tests {
                 ui.ctx(),
                 &raw.blocks,
                 &HashMap::new(),
+                16.0,
                 width,
                 height,
                 &colors,
@@ -595,6 +597,7 @@ mod tests {
                 ui.ctx(),
                 &raw.blocks,
                 &HashMap::new(),
+                16.0,
                 width,
                 height,
                 &PageColors::PAPER,
@@ -603,6 +606,7 @@ mod tests {
                 ui.ctx(),
                 &raw.blocks,
                 &HashMap::new(),
+                16.0,
                 width,
                 height,
                 &PageColors::DARK_PAGES,
@@ -661,6 +665,7 @@ mod tests {
                 ui.ctx(),
                 &raw.blocks,
                 &HashMap::new(),
+                16.0,
                 content_width(&margins),
                 content_height(&margins),
                 &PageColors::PAPER,
@@ -698,6 +703,7 @@ mod tests {
                 ui.ctx(),
                 &raw.blocks,
                 &HashMap::new(),
+                16.0,
                 content_width(&margins),
                 content_height(&margins),
                 &colors,

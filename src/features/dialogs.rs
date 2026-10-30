@@ -2,7 +2,8 @@ use eframe::egui::{self, Align2, Key, Modifiers};
 
 use crate::features::search::Hit;
 use crate::persist::{
-    MAX_MARGIN, MAX_UI_SCALE, MIN_MARGIN, MIN_UI_SCALE, PageMode, Settings, ThemePref,
+    MAX_FONT_SIZE, MAX_MARGIN, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_UI_SCALE, PageMode,
+    Settings, ThemePref,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -114,6 +115,18 @@ pub fn dialog_ui(
                         .fixed_decimals(0),
                 );
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label("Font size");
+                let font_size = ui.add(
+                    egui::Slider::new(&mut draft.font_size, MIN_FONT_SIZE..=MAX_FONT_SIZE)
+                        .step_by(1.0)
+                        .fixed_decimals(0)
+                        .suffix(" pt"),
+                );
+                if font_size.drag_stopped() || (font_size.changed() && !font_size.dragged()) {
                     changed = true;
                 }
 
