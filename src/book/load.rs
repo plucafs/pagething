@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::book::progress::{LoadProgress, LoadStage};
+
 #[derive(Debug, thiserror::Error)]
 pub enum BookError {
     #[error("failed to open epub: {0}")]
@@ -22,35 +24,85 @@ pub struct Book {
 }
 
 pub fn load(path: &Path) -> Result<Book, BookError> {
+    load_with_progress(path, &mut |_| {})
+}
+
+pub fn load_with_progress(
+    path: &Path,
+    progress: &mut impl FnMut(LoadProgress),
+) -> Result<Book, BookError> {
+    progress(LoadProgress {
+        stage: LoadStage::Opening,
+        current: 0,
+        total: 1,
+    });
     let epub = rbook::Epub::open(path).map_err(|e| BookError::Open(e.to_string()))?;
+    progress(LoadProgress {
+        stage: LoadStage::Opening,
+        current: 1,
+        total: 1,
+    });
 
     let title = epub.metadata().title().map(|t| t.value().to_string());
 
     let mut chapters = Vec::new();
     let mut reader = epub.reader();
-    while let Some(Ok(data)) = reader.read_next() {
+    let chapter_total = reader.len();
+    progress(LoadProgress {
+        stage: LoadStage::ReadingChapters,
+        current: 0,
+        total: chapter_total,
+    });
+    while let Some(result) = reader.read_next() {
+        let data = result.map_err(|e| BookError::Resource(e.to_string()))?;
         let href = normalize_path(&data.manifest_entry().href().decode());
         chapters.push(Chapter {
             href,
             xhtml: data.content().to_string(),
         });
+        progress(LoadProgress {
+            stage: LoadStage::ReadingChapters,
+            current: chapters.len(),
+            total: chapter_total,
+        });
     }
 
+    let image_entries: Vec<_> = epub.manifest().images().collect();
+    let cover_entry = epub.manifest().cover_image();
+    let image_total = image_entries.len() + usize::from(cover_entry.is_some());
+    let mut image_current = 0;
+    progress(LoadProgress {
+        stage: LoadStage::ReadingImages,
+        current: image_current,
+        total: image_total,
+    });
     let mut images = HashMap::new();
-    for image in epub.manifest().images() {
+    for image in image_entries {
         let key = normalize_path(&image.href().decode());
         let bytes = image
             .read_bytes()
             .map_err(|e| BookError::Resource(e.to_string()))?;
         images.insert(key, bytes);
+        image_current += 1;
+        progress(LoadProgress {
+            stage: LoadStage::ReadingImages,
+            current: image_current,
+            total: image_total,
+        });
     }
 
-    let cover = epub
-        .manifest()
-        .cover_image()
+    let cover = cover_entry
         .map(|entry| entry.read_bytes())
         .transpose()
         .map_err(|e| BookError::Resource(e.to_string()))?;
+    if cover.is_some() {
+        image_current += 1;
+        progress(LoadProgress {
+            stage: LoadStage::ReadingImages,
+            current: image_current,
+            total: image_total,
+        });
+    }
 
     Ok(Book {
         title,
@@ -145,9 +197,31 @@ mod tests {
     #[test]
     fn loads_real_epub() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/books/pg1342.epub");
-        let book = load(&path).expect("load pg1342");
+        let mut progress = Vec::new();
+        let book =
+            load_with_progress(&path, &mut |update| progress.push(update)).expect("load pg1342");
         assert_eq!(book.title.as_deref(), Some("Pride and Prejudice"));
         assert!(book.chapters.len() > 5);
         assert!(book.chapters.iter().any(|c| c.xhtml.contains("<body")));
+
+        let chapter_progress: Vec<_> = progress
+            .iter()
+            .filter(|update| update.stage == LoadStage::ReadingChapters)
+            .collect();
+        assert_eq!(chapter_progress.first().unwrap().current, 0);
+        assert_eq!(
+            chapter_progress.last().unwrap().current,
+            book.chapters.len()
+        );
+        assert_eq!(chapter_progress.last().unwrap().total, book.chapters.len());
+
+        let image_progress: Vec<_> = progress
+            .iter()
+            .filter(|update| update.stage == LoadStage::ReadingImages)
+            .collect();
+        assert_eq!(
+            image_progress.last().unwrap().current,
+            image_progress.last().unwrap().total
+        );
     }
 }

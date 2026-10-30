@@ -31,6 +31,7 @@ pub struct Page {
 #[derive(Debug, Clone)]
 pub struct BlockMetrics {
     pub space_above: f32,
+    pub page_break_before: bool,
     pub height: f32,
     pub row_heights: Vec<f32>,
 }
@@ -72,6 +73,10 @@ pub fn paginate(blocks: &[BlockMetrics], content_height: f32, has_cover: bool) -
         let segs = block.segment_heights();
         if segs.is_empty() {
             continue;
+        }
+        if block.page_break_before && !items.is_empty() {
+            finish_page(&mut items, &mut pages);
+            y = 0.0;
         }
         let mut seg = 0usize;
         let mut first = true;
@@ -153,6 +158,7 @@ mod tests {
     fn solid(space: f32, height: f32) -> BlockMetrics {
         BlockMetrics {
             space_above: space,
+            page_break_before: false,
             height,
             row_heights: Vec::new(),
         }
@@ -161,6 +167,7 @@ mod tests {
     fn rows(space: f32, heights: Vec<f32>) -> BlockMetrics {
         BlockMetrics {
             space_above: space,
+            page_break_before: false,
             height: heights.iter().sum(),
             row_heights: heights,
         }
@@ -202,6 +209,26 @@ mod tests {
         let pages = paginate(&blocks, 500.0, false);
         assert_eq!(pages.len(), 2);
         assert_eq!(pages[1].items[0].y, 0.0);
+    }
+
+    #[test]
+    fn chapter_start_moves_to_new_page_without_empty_pages() {
+        let mut chapter = solid(0.0, 100.0);
+        chapter.page_break_before = true;
+        let blocks = [solid(0.0, 300.0), chapter, solid(0.0, 100.0)];
+
+        let pages = paginate(&blocks, 500.0, false);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].items.len(), 1);
+        assert_eq!(pages[1].items[0].block, 1);
+        assert_eq!(pages[1].items[0].y, 0.0);
+        assert_eq!(pages[1].items[1].block, 2);
+
+        let mut first = solid(0.0, 100.0);
+        first.page_break_before = true;
+        let pages = paginate(&[first], 500.0, true);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[1].items.len(), 1);
     }
 
     #[test]

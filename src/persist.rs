@@ -334,7 +334,6 @@ mod tests {
             s,
             Settings {
                 columns: 6,
-                margin: 48.0,
                 ..Settings::default()
             }
         );

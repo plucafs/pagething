@@ -50,7 +50,7 @@ pub enum LaidKind {
         row_heights: Vec<f32>,
     },
     Image {
-        texture: Arc<TextureHandle>,
+        key: String,
         size: Vec2,
     },
     Rule,
@@ -58,6 +58,7 @@ pub enum LaidKind {
 
 pub struct LaidBlock {
     pub space_above: f32,
+    pub page_break_before: bool,
     pub kind: LaidKind,
 }
 
@@ -66,16 +67,19 @@ impl LaidBlock {
         match &self.kind {
             LaidKind::Text { row_heights, .. } => BlockMetrics {
                 space_above: self.space_above,
+                page_break_before: self.page_break_before,
                 height: row_heights.iter().sum(),
                 row_heights: row_heights.clone(),
             },
             LaidKind::Image { size, .. } => BlockMetrics {
                 space_above: self.space_above,
+                page_break_before: self.page_break_before,
                 height: size.y,
                 row_heights: Vec::new(),
             },
             LaidKind::Rule => BlockMetrics {
                 space_above: self.space_above,
+                page_break_before: self.page_break_before,
                 height: RULE_HEIGHT,
                 row_heights: Vec::new(),
             },
@@ -85,6 +89,11 @@ impl LaidBlock {
 
 const BASE_BODY_SIZE: f32 = 14.0;
 const HEADING_LEADING: f32 = 1.25;
+
+fn round_up_to_pixel(points: f32, pixels_per_point: f32) -> f32 {
+    // egui rounds row heights to the nearest physical pixel; preserve the requested minimum.
+    (points * pixels_per_point).ceil() / pixels_per_point
+}
 
 fn heading_size(level: u8) -> f32 {
     match level {
@@ -99,6 +108,7 @@ fn heading_size(level: u8) -> f32 {
 
 struct FlatBlock {
     space_above: f32,
+    page_break_before: bool,
     indent: f32,
     flush: bool,
     kind: FlatKind,
@@ -111,13 +121,23 @@ enum FlatKind {
     Rule,
 }
 
-fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
+fn flatten(
+    blocks: &[Block],
+    indent: f32,
+    chapter_starts: Option<&[usize]>,
+    out: &mut Vec<FlatBlock>,
+) {
     let mut flush = true;
-    for block in blocks {
+    let mut pending_page_break = false;
+    for (index, block) in blocks.iter().enumerate() {
+        pending_page_break |=
+            chapter_starts.is_some_and(|starts| starts.binary_search(&index).is_ok());
+        let flat_start = out.len();
         match block {
             Block::Heading { level, spans } => {
                 out.push(FlatBlock {
                     space_above: if *level <= 2 { 20.0 } else { 14.0 },
+                    page_break_before: false,
                     indent,
                     flush: false,
                     kind: FlatKind::Heading {
@@ -130,6 +150,7 @@ fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
             Block::Para(spans) => {
                 out.push(FlatBlock {
                     space_above: 0.0,
+                    page_break_before: false,
                     indent,
                     flush,
                     kind: FlatKind::Para {
@@ -138,7 +159,7 @@ fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
                 });
                 flush = false;
             }
-            Block::Quote(inner) => flatten(inner, indent + 16.0, out),
+            Block::Quote(inner) => flatten(inner, indent + 16.0, None, out),
             Block::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
                     let prefix = if *ordered {
@@ -147,7 +168,7 @@ fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
                         "• ".to_string()
                     };
                     let start = out.len();
-                    flatten(item, indent + 18.0, out);
+                    flatten(item, indent + 18.0, None, out);
                     if let Some(fb) = out.get_mut(start)
                         && let FlatKind::Para { spans } = &mut fb.kind
                     {
@@ -165,6 +186,7 @@ fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
             Block::Image { path, alt: _ } => {
                 out.push(FlatBlock {
                     space_above: 10.0,
+                    page_break_before: false,
                     indent,
                     flush: false,
                     kind: FlatKind::Image { path: path.clone() },
@@ -174,12 +196,20 @@ fn flatten(blocks: &[Block], indent: f32, out: &mut Vec<FlatBlock>) {
             Block::Rule => {
                 out.push(FlatBlock {
                     space_above: 12.0,
+                    page_break_before: false,
                     indent,
                     flush: false,
                     kind: FlatKind::Rule,
                 });
                 flush = true;
             }
+        }
+        if pending_page_break
+            && out.len() > flat_start
+            && let Some(first) = out.get_mut(flat_start)
+        {
+            first.page_break_before = true;
+            pending_page_break = false;
         }
     }
 }
@@ -211,36 +241,29 @@ fn push_spans(
 }
 
 fn row_heights(galley: &egui::text::Galley) -> Vec<f32> {
-    let rows = &galley.rows;
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    let total = galley.size().y;
-    let mut heights = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        let next = rows
-            .get(i + 1)
-            .map(|r| r.pos.y)
-            .unwrap_or_else(|| rows[0].pos.y + total);
-        heights.push((next - row.pos.y).max(1.0));
-    }
-    heights
+    galley.rows.iter().map(|row| row.rect().height()).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn layout_blocks(
     ctx: &Context,
     blocks: &[Block],
-    images: &HashMap<String, Arc<TextureHandle>>,
+    chapter_starts: &[usize],
+    image_sizes: &HashMap<String, Vec2>,
     body_size: f32,
     content_width: f32,
     content_height: f32,
     colors: &PageColors,
 ) -> Vec<LaidBlock> {
     let mut flat = Vec::new();
-    flatten(blocks, 0.0, &mut flat);
+    flatten(blocks, 0.0, Some(chapter_starts), &mut flat);
 
     let mut out = Vec::with_capacity(flat.len());
+    let mut pending_page_break = false;
     for fb in flat {
+        pending_page_break |= fb.page_break_before;
+        let page_break_before = pending_page_break;
+        let output_len = out.len();
         match fb.kind {
             FlatKind::Para { spans } => {
                 let mut job = LayoutJob::default();
@@ -252,7 +275,7 @@ pub fn layout_blocks(
                     body_size,
                     colors.body,
                     colors.code_bg,
-                    body_size * 1.4,
+                    round_up_to_pixel(body_size * 1.4, ctx.pixels_per_point()),
                 );
                 if !fb.flush
                     && let Some(first) = job.sections.first_mut()
@@ -270,6 +293,7 @@ pub fn layout_blocks(
                 }
                 out.push(LaidBlock {
                     space_above: fb.space_above,
+                    page_break_before,
                     kind: LaidKind::Text {
                         galley,
                         job,
@@ -304,6 +328,7 @@ pub fn layout_blocks(
                 }
                 out.push(LaidBlock {
                     space_above: fb.space_above,
+                    page_break_before,
                     kind: LaidKind::Text {
                         galley,
                         job,
@@ -313,10 +338,9 @@ pub fn layout_blocks(
                 });
             }
             FlatKind::Image { path } => {
-                let Some(texture) = images.get(&path) else {
+                let Some(size) = image_sizes.get(&path).copied() else {
                     continue;
                 };
-                let size = texture.size_vec2();
                 let max_w = content_width - fb.indent;
                 let mut scale = (max_w / size.x).min(1.0);
                 if size.y * scale > content_height {
@@ -324,16 +348,21 @@ pub fn layout_blocks(
                 }
                 out.push(LaidBlock {
                     space_above: fb.space_above,
+                    page_break_before,
                     kind: LaidKind::Image {
-                        texture: Arc::clone(texture),
+                        key: path,
                         size: size * scale,
                     },
                 });
             }
             FlatKind::Rule => out.push(LaidBlock {
                 space_above: fb.space_above,
+                page_break_before,
                 kind: LaidKind::Rule,
             }),
+        }
+        if out.len() > output_len {
+            pending_page_break = false;
         }
     }
 
@@ -457,6 +486,16 @@ mod tests {
     use crate::book::prepare::prepare;
     use std::path::Path;
 
+    fn prepared_image_sizes(
+        prepared: &crate::book::prepare::PreparedBook,
+    ) -> HashMap<String, Vec2> {
+        prepared
+            .images
+            .iter()
+            .map(|(name, image)| (name.clone(), image.size))
+            .collect()
+    }
+
     #[test]
     fn body_jobs_are_justified_with_book_leading_and_indent() {
         let ctx = Context::default();
@@ -495,6 +534,7 @@ mod tests {
             let laid = layout_blocks(
                 ui.ctx(),
                 &blocks,
+                &[],
                 &HashMap::new(),
                 16.0,
                 content_width(&margins),
@@ -520,7 +560,10 @@ mod tests {
 
         assert!(jobs[1].justify);
         assert_eq!(jobs[1].sections[0].leading_space, 0.0);
-        assert_eq!(jobs[1].sections[0].format.line_height, Some(16.0 * 1.4));
+        assert_eq!(
+            jobs[1].sections[0].format.line_height,
+            Some(round_up_to_pixel(16.0 * 1.4, ctx.pixels_per_point()))
+        );
         assert_eq!(jobs[1].sections[0].format.font_id.size, 16.0);
 
         assert!(jobs[2].justify);
@@ -535,10 +578,77 @@ mod tests {
     }
 
     #[test]
+    fn fractional_scale_keeps_requested_line_height_in_pagination() {
+        let ctx = Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+        ctx.set_zoom_factor(1.3);
+
+        let body_size = 16.0;
+        let requested_line_height = body_size * 1.4;
+        let spans = vec![Span {
+            text: "Wrapped text for a row-height regression test. ".repeat(40),
+            ..Default::default()
+        }];
+        let mut measured = None;
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            let laid = layout_blocks(
+                ui.ctx(),
+                &[Block::Para(spans.clone())],
+                &[],
+                &HashMap::new(),
+                body_size,
+                220.0,
+                800.0,
+                &PageColors::PAPER,
+            );
+            let LaidKind::Text {
+                galley,
+                job,
+                row_heights,
+                ..
+            } = &laid[0].kind
+            else {
+                panic!("expected a text block");
+            };
+            measured = Some((
+                job.sections[0].format.line_height.unwrap(),
+                row_heights.clone(),
+                galley
+                    .rows
+                    .iter()
+                    .map(|row| row.rect().height())
+                    .collect::<Vec<_>>(),
+                ui.ctx().pixels_per_point(),
+            ));
+        });
+        output.textures_delta.clear();
+
+        let (line_height, row_heights, measured_rows, pixels_per_point) = measured.unwrap();
+        assert_eq!(
+            line_height,
+            round_up_to_pixel(requested_line_height, pixels_per_point)
+        );
+        assert!(row_heights.len() > 1);
+        assert!(
+            row_heights
+                .iter()
+                .all(|&height| height >= requested_line_height)
+        );
+        assert_eq!(row_heights, measured_rows);
+    }
+
+    #[test]
     fn lays_out_and_paginates_real_book() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/books/pg1342.epub");
         let raw = prepare(&path).expect("prepare pg1342");
         assert!(!raw.blocks.is_empty());
+        assert!(!raw.images.is_empty());
+        assert!(raw.cover.is_some());
+        assert!(
+            raw.images
+                .values()
+                .all(|image| image.size.x > 0.0 && image.size.y > 0.0)
+        );
 
         let ctx = Context::default();
         crate::render::fonts::install_for_tests(&ctx);
@@ -547,13 +657,15 @@ mod tests {
         let width = content_width(&margins);
         let height = content_height(&margins);
         let colors = PageColors::PAPER;
+        let image_sizes = prepared_image_sizes(&raw);
 
         let mut laid = Vec::new();
         let mut output = ctx.run_ui(Default::default(), |ui| {
             laid = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
-                &HashMap::new(),
+                &raw.chapter_starts,
+                &image_sizes,
                 16.0,
                 width,
                 height,
@@ -566,6 +678,28 @@ mod tests {
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
         let pages = paginate::paginate(&metrics, height, raw.cover.is_some());
         assert!(pages.len() > 50);
+
+        let chapter_blocks: Vec<_> = laid
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| block.page_break_before.then_some(index))
+            .collect();
+        assert!(chapter_blocks.len() > 1);
+        for block in chapter_blocks {
+            let (page, item) = pages
+                .iter()
+                .enumerate()
+                .find_map(|(page, page_data)| {
+                    page_data
+                        .items
+                        .iter()
+                        .find(|item| item.block == block)
+                        .map(|item| (page, item))
+                })
+                .expect("chapter start must be paginated");
+            assert_eq!(pages[page].items[0].block, block);
+            assert_eq!(item.y, 0.0);
+        }
 
         for page in &pages {
             if page.kind == paginate::PageKind::Cover {
@@ -589,6 +723,7 @@ mod tests {
         let margins = DEFAULT_MARGINS;
         let width = content_width(&margins);
         let height = content_height(&margins);
+        let image_sizes = prepared_image_sizes(&raw);
 
         let mut paper_rows = Vec::new();
         let mut dark_rows = Vec::new();
@@ -596,7 +731,8 @@ mod tests {
             let paper = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
-                &HashMap::new(),
+                &raw.chapter_starts,
+                &image_sizes,
                 16.0,
                 width,
                 height,
@@ -605,7 +741,8 @@ mod tests {
             let dark = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
-                &HashMap::new(),
+                &raw.chapter_starts,
+                &image_sizes,
                 16.0,
                 width,
                 height,
@@ -659,12 +796,14 @@ mod tests {
 
         let mut cache = DisplayCache::default();
         let mut checked = 0usize;
+        let image_sizes = prepared_image_sizes(&raw);
         let mut output = ctx.run_ui(Default::default(), |ui| {
             let margins = DEFAULT_MARGINS;
             let laid = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
-                &HashMap::new(),
+                &raw.chapter_starts,
+                &image_sizes,
                 16.0,
                 content_width(&margins),
                 content_height(&margins),
@@ -697,12 +836,14 @@ mod tests {
 
         let margins = DEFAULT_MARGINS;
         let colors = PageColors::PAPER;
+        let image_sizes = prepared_image_sizes(&raw);
         let mut pages = Vec::new();
         let mut output = ctx.run_ui(Default::default(), |ui| {
             let laid = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
-                &HashMap::new(),
+                &raw.chapter_starts,
+                &image_sizes,
                 16.0,
                 content_width(&margins),
                 content_height(&margins),

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui::{self, Color32, Key, Modifiers, PointerButton, Response, ViewportCommand};
@@ -8,6 +9,7 @@ use eframe::egui::{self, Color32, Key, Modifiers, PointerButton, Response, Viewp
 use crate::book::blocks::Block;
 use crate::book::paginate;
 use crate::book::prepare::{self, PreparedBook};
+use crate::book::progress::{LoadProgress, LoadStage};
 use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
 use crate::features::search::{self, Hit};
@@ -27,7 +29,17 @@ struct LoadedBook {
     laid: Vec<LaidBlock>,
     pages: Vec<paginate::Page>,
     blocks: Vec<Block>,
+    chapter_starts: Vec<usize>,
+    image_sizes: HashMap<String, egui::Vec2>,
     textures: HashMap<String, Arc<egui::TextureHandle>>,
+    image_rx: Option<Receiver<ImageDecodeMessage>>,
+    image_cancel: Arc<AtomicBool>,
+}
+
+impl Drop for LoadedBook {
+    fn drop(&mut self) {
+        self.image_cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 enum Phase {
@@ -35,9 +47,21 @@ enum Phase {
         error: Option<String>,
     },
     Loading {
-        rx: Receiver<Result<PreparedBook, String>>,
+        rx: Receiver<LoadMessage>,
+        progress: LoadProgress,
+        prepared: Option<PreparedBook>,
     },
     Ready(LoadedBook),
+}
+
+enum LoadMessage {
+    Progress(LoadProgress),
+    Done(Result<PreparedBook, String>),
+}
+
+enum ImageDecodeMessage {
+    Decoded(String, egui::ColorImage),
+    Finished,
 }
 
 pub struct PagethingApp {
@@ -132,10 +156,20 @@ impl PagethingApp {
         let (tx, rx) = mpsc::channel();
         let load_path = path.clone();
         std::thread::spawn(move || {
-            let result = prepare::prepare(&load_path).map_err(|e| e.to_string());
-            let _ = tx.send(result);
+            let result = prepare::prepare_with_progress(&load_path, &mut |progress| {
+                let _ = tx.send(LoadMessage::Progress(progress));
+            });
+            let _ = tx.send(LoadMessage::Done(result));
         });
-        self.phase = Phase::Loading { rx };
+        self.phase = Phase::Loading {
+            rx,
+            progress: LoadProgress {
+                stage: LoadStage::Opening,
+                current: 0,
+                total: 1,
+            },
+            prepared: None,
+        };
         self.current_book = Some(path);
     }
 
@@ -162,14 +196,20 @@ impl PagethingApp {
     }
 
     fn build_book(ctx: &egui::Context, raw: PreparedBook, settings: Settings) -> LoadedBook {
-        let mut textures = HashMap::new();
-        for (name, image) in raw.images {
-            let handle = layout::load_texture(ctx, &name, &image);
-            textures.insert(name, Arc::new(handle));
-        }
+        let image_sizes: HashMap<_, _> = raw
+            .images
+            .iter()
+            .map(|(name, image)| (name.clone(), image.size))
+            .collect();
+        let image_bytes: Vec<_> = raw
+            .images
+            .into_iter()
+            .map(|(name, image)| (name, image.bytes))
+            .collect();
         let cover = raw
             .cover
             .map(|image| Arc::new(layout::load_texture(ctx, "cover", &image)));
+        let has_cover = cover.is_some();
 
         let margins = Margins::uniform(settings.margin);
         let width = layout::content_width(&margins);
@@ -177,15 +217,38 @@ impl PagethingApp {
         let laid = layout::layout_blocks(
             ctx,
             &raw.blocks,
-            &textures,
+            &raw.chapter_starts,
+            &image_sizes,
             settings.font_size,
             width,
             height,
             &PageColors::for_mode(settings.page_mode),
         );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
-        let mut pages = paginate::paginate(&metrics, height, cover.is_some());
+        let mut pages = paginate::paginate(&metrics, height, has_cover);
         layout::attach_page_texts(&mut pages, &laid);
+
+        let image_cancel = Arc::new(AtomicBool::new(false));
+        let image_rx = if image_bytes.is_empty() {
+            None
+        } else {
+            let (tx, rx) = mpsc::channel();
+            let cancel = Arc::clone(&image_cancel);
+            std::thread::spawn(move || {
+                for (name, bytes) in image_bytes {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Some(image) = layout::decode_image(&bytes)
+                        && tx.send(ImageDecodeMessage::Decoded(name, image)).is_err()
+                    {
+                        break;
+                    }
+                }
+                let _ = tx.send(ImageDecodeMessage::Finished);
+            });
+            Some(rx)
+        };
 
         LoadedBook {
             title: raw.title,
@@ -193,30 +256,106 @@ impl PagethingApp {
             laid,
             pages,
             blocks: raw.blocks,
-            textures,
+            chapter_starts: raw.chapter_starts,
+            image_sizes,
+            textures: HashMap::new(),
+            image_rx,
+            image_cancel,
+        }
+    }
+
+    fn poll_image_decode(&mut self, ctx: &egui::Context) {
+        let Phase::Ready(book) = &mut self.phase else {
+            return;
+        };
+        let Some(rx) = book.image_rx.as_ref() else {
+            return;
+        };
+
+        let mut decoded = 0;
+        let mut finished = false;
+        while decoded < 2 {
+            match rx.try_recv() {
+                Ok(ImageDecodeMessage::Decoded(name, image)) => {
+                    let texture = layout::load_texture(ctx, &name, &image);
+                    book.textures.insert(name, Arc::new(texture));
+                    decoded += 1;
+                }
+                Ok(ImageDecodeMessage::Finished) => {
+                    finished = true;
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if finished {
+            book.image_rx = None;
+        } else {
+            ctx.request_repaint();
         }
     }
 
     fn poll_loading(&mut self, ctx: &egui::Context) {
-        let mut outcome: Option<Result<PreparedBook, String>> = None;
-        if let Phase::Loading { rx } = &self.phase {
-            match rx.try_recv() {
-                Ok(result) => outcome = Some(result),
-                Err(TryRecvError::Disconnected) => {
-                    outcome = Some(Err("book loading failed".to_owned()))
+        let prepared = match &mut self.phase {
+            Phase::Loading { prepared, .. } => prepared.take(),
+            _ => None,
+        };
+        if let Some(raw) = prepared {
+            let book = Self::build_book(ctx, raw, self.settings.settings());
+            self.phase = Phase::Ready(book);
+            return;
+        }
+
+        let mut outcome = None;
+        let mut latest_progress = None;
+        let mut disconnected = false;
+        if let Phase::Loading { rx, .. } = &self.phase {
+            loop {
+                match rx.try_recv() {
+                    Ok(LoadMessage::Progress(progress)) => latest_progress = Some(progress),
+                    Ok(LoadMessage::Done(result)) => outcome = Some(result),
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
                 }
-                Err(TryRecvError::Empty) => {}
             }
+        }
+
+        if let Phase::Loading { progress, .. } = &mut self.phase
+            && let Some(latest) = latest_progress
+        {
+            *progress = latest;
         }
 
         if let Some(result) = outcome {
             match result {
-                Ok(raw) => {
-                    let book = Self::build_book(ctx, raw, self.settings.settings());
-                    self.phase = Phase::Ready(book);
+                Ok(prepared) => {
+                    if let Phase::Loading {
+                        progress,
+                        prepared: pending,
+                        ..
+                    } = &mut self.phase
+                    {
+                        *progress = LoadProgress {
+                            stage: LoadStage::Typesetting,
+                            current: 0,
+                            total: 1,
+                        };
+                        *pending = Some(prepared);
+                    }
                 }
                 Err(error) => self.phase = Phase::Empty { error: Some(error) },
             }
+        } else if disconnected {
+            self.phase = Phase::Empty {
+                error: Some("book loading failed".to_owned()),
+            };
         }
     }
 
@@ -231,7 +370,8 @@ impl PagethingApp {
         book.laid = layout::layout_blocks(
             ctx,
             &book.blocks,
-            &book.textures,
+            &book.chapter_starts,
+            &book.image_sizes,
             settings.font_size,
             width,
             height,
@@ -749,6 +889,7 @@ impl PagethingApp {
     }
 
     fn paint_canvas(&mut self, ui: &mut egui::Ui) {
+        self.poll_image_decode(ui.ctx());
         let canvas_rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
         self.view.handle_input(ui.ctx(), canvas_rect, &response);
@@ -801,13 +942,42 @@ impl PagethingApp {
                     color,
                 );
             }
-            Phase::Loading { .. } => {
+            Phase::Loading { progress, .. } => {
+                let center = canvas_rect.center();
+                let fraction = progress.fraction();
+                let bar_rect = egui::Rect::from_center_size(
+                    center + egui::vec2(0.0, 6.0),
+                    egui::vec2(320.0, 12.0),
+                );
+                let visuals = ui.ctx().style_of(ui.ctx().theme()).visuals.clone();
                 painter.text(
-                    canvas_rect.center(),
+                    center - egui::vec2(0.0, 28.0),
                     egui::Align2::CENTER_CENTER,
                     "Loading…",
                     egui::FontId::proportional(18.0),
                     theme::loading_color(ui.ctx().theme()),
+                );
+                painter.rect_filled(bar_rect, 6.0, visuals.widgets.noninteractive.bg_fill);
+                if fraction > 0.0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            bar_rect.min,
+                            egui::vec2(bar_rect.width() * fraction, bar_rect.height()),
+                        ),
+                        6.0,
+                        theme::loading_color(ui.ctx().theme()),
+                    );
+                }
+                painter.text(
+                    center + egui::vec2(0.0, 30.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!(
+                        "{} · {}%",
+                        progress.label(),
+                        (fraction * 100.0).round() as u32
+                    ),
+                    egui::FontId::proportional(13.0),
+                    theme::hint_color(ui.ctx().theme()),
                 );
             }
             Phase::Ready(book) => {
@@ -854,6 +1024,7 @@ impl PagethingApp {
                         page,
                         laid: &book.laid,
                         cover: book.cover.as_ref(),
+                        textures: &book.textures,
                         number: i + 1,
                         font_uv,
                         margins,

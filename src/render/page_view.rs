@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -17,6 +18,7 @@ pub struct PageView<'a> {
     pub page: &'a Page,
     pub laid: &'a [LaidBlock],
     pub cover: Option<&'a Arc<egui::TextureHandle>>,
+    pub textures: &'a HashMap<String, Arc<egui::TextureHandle>>,
     pub number: usize,
     pub font_uv: Vec2,
     pub margins: Margins,
@@ -97,14 +99,24 @@ pub fn paint_page(
                     );
                 }
             }
-            LaidKind::Image { texture, size } => {
+            LaidKind::Image { key, size } => {
                 let rect = Rect::from_min_size(origin + Vec2::new(0.0, 0.0), *size * zoom);
-                painter.image(
-                    texture.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                if let Some(texture) = pv.textures.get(key) {
+                    painter.image(
+                        texture.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    painter.rect_filled(rect, 1.0, pv.colors.code_bg);
+                    painter.rect_stroke(
+                        rect,
+                        1.0,
+                        Stroke::new(1.0, pv.colors.rule),
+                        StrokeKind::Inside,
+                    );
+                }
             }
             LaidKind::Rule => {
                 let width = (PAGE_SIZE.x - pv.margins.left - pv.margins.right) * zoom;
