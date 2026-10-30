@@ -50,6 +50,8 @@ pub struct PagethingApp {
     current_book: Option<PathBuf>,
     dialog: Option<Dialog>,
     pending_jump: Option<usize>,
+    pending_navigation: Option<bool>,
+    pending_selection_search: Option<String>,
     text_rendering: fastframe_text::TextRendering,
     selection: Option<Selection>,
     selection_drag: bool,
@@ -77,6 +79,8 @@ impl PagethingApp {
             current_book: None,
             dialog: None,
             pending_jump: None,
+            pending_navigation: None,
+            pending_selection_search: None,
             text_rendering,
             selection: None,
             selection_drag: false,
@@ -252,6 +256,7 @@ impl PagethingApp {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         if self.dialog.is_none()
+            && !ctx.any_popup_open()
             && let Phase::Ready(book) = &self.phase
         {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
@@ -274,6 +279,51 @@ impl PagethingApp {
             let text = selection::copy_text(page, &book.laid, sel);
             if !text.is_empty() {
                 ctx.copy_text(text);
+            }
+        }
+
+        if self.dialog.is_none() && !ctx.any_popup_open() {
+            let has_selection = self.selection.is_some_and(|sel| !sel.is_empty());
+            if has_selection
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C))
+                && let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase)
+                && let Some(page) = book.pages.get(sel.page)
+            {
+                let text = selection::copy_text(page, &book.laid, sel);
+                if !text.is_empty() {
+                    ctx.copy_text(text);
+                }
+            } else if has_selection
+                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F))
+                && let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase)
+                && let Some(page) = book.pages.get(sel.page)
+            {
+                let query = selection::copy_text(page, &book.laid, sel);
+                self.dialog = Some(Dialog::Search {
+                    input: query.clone(),
+                });
+                self.pending_selection_search = Some(query);
+            } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
+                self.selection = None;
+                self.selection_drag = false;
+            }
+
+            if self.dialog.is_none() && matches!(self.phase, Phase::Ready(_)) {
+                let backward = ctx.input_mut(|i| {
+                    i.consume_key(Modifiers::NONE, Key::Z)
+                        || i.consume_key(Modifiers::NONE, Key::ArrowLeft)
+                        || i.consume_key(Modifiers::NONE, Key::PageUp)
+                });
+                let forward = ctx.input_mut(|i| {
+                    i.consume_key(Modifiers::NONE, Key::X)
+                        || i.consume_key(Modifiers::NONE, Key::ArrowRight)
+                        || i.consume_key(Modifiers::NONE, Key::PageDown)
+                });
+                if backward {
+                    self.pending_navigation = Some(false);
+                } else if forward {
+                    self.pending_navigation = Some(true);
+                }
             }
         }
         self.view.handle_shortcuts(ctx);
@@ -330,6 +380,38 @@ impl PagethingApp {
                         ui.send_viewport_cmd(ViewportCommand::Close);
                     }
                 });
+                ui.menu_button("View", |ui| {
+                    ui.add_enabled_ui(matches!(self.phase, Phase::Ready(_)), |ui| {
+                        if ui
+                            .add(egui::Button::new("Go to page…").shortcut_text("Ctrl+G"))
+                            .clicked()
+                        {
+                            ui.close();
+                            self.dialog = Some(Dialog::Jump {
+                                input: String::new(),
+                            });
+                        }
+                    });
+                    if ui
+                        .add(egui::Button::new("Columns…").shortcut_text("Ctrl+L"))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.dialog = Some(Dialog::Columns {
+                            input: self.columns.to_string(),
+                        });
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Shortcuts").clicked() {
+                        ui.close();
+                        self.dialog = Some(Dialog::Shortcuts);
+                    }
+                    if ui.button("About").clicked() {
+                        ui.close();
+                        self.dialog = Some(Dialog::Help);
+                    }
+                });
             });
         });
     }
@@ -368,14 +450,46 @@ impl PagethingApp {
         if page == 0 {
             return;
         }
+        self.selection = None;
+        self.selection_drag = false;
+        self.center_page(page, canvas_rect);
+    }
+
+    fn center_page(&mut self, page: usize, canvas_rect: egui::Rect) {
+        if page == 0 {
+            return;
+        }
         let world_rect = grid::page_rect(page - 1, self.columns, grid::GAP);
         let world_center = world_rect.center();
         self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
     }
 
+    fn navigate_page(&mut self, forward: bool, canvas_rect: egui::Rect) {
+        let Phase::Ready(book) = &self.phase else {
+            return;
+        };
+        let page_count = book.pages.len();
+        let center = self.view.to_world(canvas_rect.center()).to_pos2();
+        let Some(current) =
+            grid::page_index_at_or_near(center, self.columns, grid::GAP, page_count)
+        else {
+            return;
+        };
+        let Some(target) = grid::adjacent_page_index(current, page_count, forward) else {
+            return;
+        };
+        self.jump_to_page(target + 1, canvas_rect);
+    }
+
     /// Enter (forward) / Shift+Enter (backward): re-search when the query
     /// changed, otherwise advance the index with wrap-around, then jump.
-    fn goto_hit(&mut self, forward: bool, query: &str, canvas_rect: egui::Rect) {
+    fn goto_hit(
+        &mut self,
+        forward: bool,
+        query: &str,
+        canvas_rect: egui::Rect,
+        preserve_selection: bool,
+    ) {
         if query != self.search_query {
             if let Phase::Ready(book) = &self.phase {
                 self.search_hits = search::search(&book.pages, query);
@@ -392,7 +506,11 @@ impl PagethingApp {
         }
         if let Some(hit) = self.search_hits.get(self.search_index) {
             let page = hit.page + 1;
-            self.jump_to_page(page, canvas_rect);
+            if preserve_selection {
+                self.center_page(page, canvas_rect);
+            } else {
+                self.jump_to_page(page, canvas_rect);
+            }
         }
     }
 
@@ -472,8 +590,8 @@ impl PagethingApp {
                 self.columns = columns;
                 self.settings.update(|s| s.columns = columns);
             }
-            Outcome::Search(query) => self.goto_hit(true, &query, canvas_rect),
-            Outcome::SearchPrev => self.goto_hit(false, &search_input, canvas_rect),
+            Outcome::Search(query) => self.goto_hit(true, &query, canvas_rect, false),
+            Outcome::SearchPrev => self.goto_hit(false, &search_input, canvas_rect, false),
             Outcome::SearchJump(index) => {
                 if let Some(hit) = self.search_hits.get(index) {
                     self.search_index = index;
@@ -504,6 +622,12 @@ impl PagethingApp {
 
         if let Some(page) = self.pending_jump.take() {
             self.jump_to_page(page, canvas_rect);
+        }
+        if let Some(forward) = self.pending_navigation.take() {
+            self.navigate_page(forward, canvas_rect);
+        }
+        if let Some(query) = self.pending_selection_search.take() {
+            self.goto_hit(true, &query, canvas_rect, true);
         }
         self.handle_selection_input(canvas_rect, &response);
 

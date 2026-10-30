@@ -13,6 +13,8 @@ pub enum Dialog {
     Columns { input: String },
     Settings { draft: Settings },
     Search { input: String },
+    Shortcuts,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +55,8 @@ pub fn dialog_ui(
         Dialog::Columns { .. } => "Columns",
         Dialog::Settings { .. } => "Settings",
         Dialog::Search { .. } => "Search",
+        Dialog::Shortcuts => "Shortcuts",
+        Dialog::Help => "About pagething",
     };
     let anchor = match dialog {
         Dialog::Search { .. } => (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0)),
@@ -193,6 +197,75 @@ pub fn dialog_ui(
                                 }
                             }
                         });
+                }
+            }
+            Dialog::Shortcuts => {
+                let keyboard = [
+                    ("Ctrl+O", "Open EPUB"),
+                    ("Ctrl+N", "Open a new window"),
+                    ("Ctrl+Q", "Quit"),
+                    ("Ctrl+G", "Go to page"),
+                    ("Ctrl+L", "Set columns"),
+                    ("Ctrl+F", "Search the book"),
+                    ("Ctrl+,", "Open settings"),
+                    ("Ctrl+0", "Reset view"),
+                    ("Ctrl+C", "Copy selected text"),
+                    ("c", "Copy selected text"),
+                    ("f", "Find selected text"),
+                    ("q", "Clear text selection"),
+                    ("z / Left / PgUp", "Previous page (wraps)"),
+                    ("x / Right / PgDn", "Next page (wraps)"),
+                    ("Home", "First page"),
+                    ("End", "Last page"),
+                    ("Enter", "Next search result"),
+                    ("Shift+Enter", "Previous search result"),
+                ];
+                let mouse = [
+                    ("Left-drag", "Select text on a page"),
+                    ("Middle-drag", "Pan the canvas"),
+                    ("Wheel", "Zoom toward the pointer"),
+                    ("Two-finger scroll", "Pan the canvas"),
+                ];
+
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        ui.strong("Keyboard");
+                        egui::Grid::new("shortcuts_keyboard")
+                            .num_columns(2)
+                            .spacing([16.0, 4.0])
+                            .show(ui, |ui| {
+                                for (shortcut, action) in keyboard {
+                                    ui.monospace(shortcut);
+                                    ui.label(action);
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(8.0);
+                        ui.strong("Mouse and trackpad");
+                        egui::Grid::new("shortcuts_pointer")
+                            .num_columns(2)
+                            .spacing([16.0, 4.0])
+                            .show(ui, |ui| {
+                                for (shortcut, action) in mouse {
+                                    ui.monospace(shortcut);
+                                    ui.label(action);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::Help => {
+                ui.label("pagething is an infinite-canvas EPUB reader.");
+                ui.label("Open a book from File → Open, then pan and zoom across its pages.");
+                ui.label("Drag across text to select it. Choose About → Shortcuts for the full reference.");
+                ui.separator();
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
                 }
             }
         });
