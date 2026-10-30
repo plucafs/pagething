@@ -138,11 +138,11 @@ pub fn dialog_ui(
                     }
                 });
 
-                ui.label("Page mode");
+                ui.label("Page theme");
                 ui.horizontal(|ui| {
                     for (mode, label) in [
-                        (PageMode::Paper, "Paper"),
-                        (PageMode::DarkPages, "Dark pages"),
+                        (PageMode::Paper, "Light"),
+                        (PageMode::DarkPages, "Dark"),
                     ] {
                         if ui
                             .selectable_value(&mut draft.page_mode, mode, label)
