@@ -37,6 +37,29 @@ pub const MAX_FONT_SIZE: f32 = 32.0;
 pub const MIN_PAGE_GAP: f32 = 0.0;
 pub const MAX_PAGE_GAP: f32 = 200.0;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PageRatio {
+    Square,
+    ThreeFour,
+    A5,
+    #[default]
+    TwoThree,
+    FiveEight,
+}
+
+impl PageRatio {
+    pub fn height_over_width(self) -> f32 {
+        match self {
+            Self::Square => 1.0,
+            Self::ThreeFour => 4.0 / 3.0,
+            Self::A5 => 2.0_f32.sqrt(),
+            Self::TwoThree => 1.5,
+            Self::FiveEight => 1.6,
+        }
+    }
+}
+
 fn default_margin() -> f32 {
     96.0
 }
@@ -86,6 +109,14 @@ pub struct Settings {
     pub font_size: f32,
     #[serde(default = "default_page_gap")]
     pub page_gap: f32,
+    #[serde(default)]
+    pub page_ratio: PageRatio,
+    #[serde(default = "default_toolbar")]
+    pub toolbar: bool,
+}
+
+fn default_toolbar() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -98,6 +129,8 @@ impl Default for Settings {
             ui_scale: default_ui_scale(),
             font_size: default_font_size(),
             page_gap: default_page_gap(),
+            page_ratio: PageRatio::default(),
+            toolbar: default_toolbar(),
         }
     }
 }
@@ -307,6 +340,8 @@ mod tests {
             s.ui_scale = 1.5;
             s.font_size = 20.0;
             s.page_gap = 80.0;
+            s.page_ratio = PageRatio::FiveEight;
+            s.toolbar = false;
         });
 
         let reloaded = SettingsStore::load_from(path.clone());
@@ -318,6 +353,8 @@ mod tests {
         assert_eq!(s.ui_scale, 1.5);
         assert_eq!(s.font_size, 20.0);
         assert_eq!(s.page_gap, 80.0);
+        assert_eq!(s.page_ratio, PageRatio::FiveEight);
+        assert!(!s.toolbar);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -375,6 +412,13 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"theme\":\"light\""));
         assert!(json.contains("\"page_mode\":\"dark_pages\""));
+    }
+
+    #[test]
+    fn new_settings_default_for_legacy_files() {
+        let settings: Settings = serde_json::from_str(r#"{"columns":6}"#).unwrap();
+        assert_eq!(settings.page_ratio, PageRatio::TwoThree);
+        assert!(settings.toolbar);
     }
 
     #[test]

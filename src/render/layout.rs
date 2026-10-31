@@ -7,7 +7,6 @@ use eframe::egui::{
 
 use crate::book::blocks::{Block, Span};
 use crate::book::paginate::{self, BlockMetrics};
-use crate::canvas::grid::PAGE_SIZE;
 use crate::render::fonts;
 use crate::render::theme::PageColors;
 
@@ -34,12 +33,12 @@ pub const DEFAULT_MARGINS: Margins = Margins::uniform(48.0);
 
 pub const RULE_HEIGHT: f32 = 2.0;
 
-pub fn content_width(margins: &Margins) -> f32 {
-    PAGE_SIZE.x - margins.left - margins.right
+pub fn content_width(margins: &Margins, page_size: Vec2) -> f32 {
+    page_size.x - margins.left - margins.right
 }
 
-pub fn content_height(margins: &Margins) -> f32 {
-    PAGE_SIZE.y - margins.top - margins.bottom
+pub fn content_height(margins: &Margins, page_size: Vec2) -> f32 {
+    page_size.y - margins.top - margins.bottom
 }
 
 pub enum LaidKind {
@@ -496,6 +495,10 @@ mod tests {
             .collect()
     }
 
+    fn test_page_size() -> Vec2 {
+        crate::canvas::grid::page_size(crate::persist::PageRatio::default())
+    }
+
     #[test]
     fn body_jobs_are_justified_with_book_leading_and_indent() {
         let ctx = Context::default();
@@ -537,8 +540,8 @@ mod tests {
                 &[],
                 &HashMap::new(),
                 16.0,
-                content_width(&margins),
-                content_height(&margins),
+                content_width(&margins, test_page_size()),
+                content_height(&margins, test_page_size()),
                 &colors,
             );
             for b in &laid {
@@ -654,8 +657,9 @@ mod tests {
         crate::render::fonts::install_for_tests(&ctx);
 
         let margins = DEFAULT_MARGINS;
-        let width = content_width(&margins);
-        let height = content_height(&margins);
+        let page_size = test_page_size();
+        let width = content_width(&margins, page_size);
+        let height = content_height(&margins, page_size);
         let colors = PageColors::PAPER;
         let image_sizes = prepared_image_sizes(&raw);
 
@@ -721,8 +725,9 @@ mod tests {
         crate::render::fonts::install_for_tests(&ctx);
 
         let margins = DEFAULT_MARGINS;
-        let width = content_width(&margins);
-        let height = content_height(&margins);
+        let page_size = test_page_size();
+        let width = content_width(&margins, page_size);
+        let height = content_height(&margins, page_size);
         let image_sizes = prepared_image_sizes(&raw);
 
         let mut paper_rows = Vec::new();
@@ -799,14 +804,15 @@ mod tests {
         let image_sizes = prepared_image_sizes(&raw);
         let mut output = ctx.run_ui(Default::default(), |ui| {
             let margins = DEFAULT_MARGINS;
+            let page_size = test_page_size();
             let laid = layout_blocks(
                 ui.ctx(),
                 &raw.blocks,
                 &raw.chapter_starts,
                 &image_sizes,
                 16.0,
-                content_width(&margins),
-                content_height(&margins),
+                content_width(&margins, page_size),
+                content_height(&margins, page_size),
                 &PageColors::PAPER,
             );
             for (bi, block) in laid.iter().enumerate() {
@@ -835,6 +841,7 @@ mod tests {
         crate::render::fonts::install_for_tests(&ctx);
 
         let margins = DEFAULT_MARGINS;
+        let page_size = test_page_size();
         let colors = PageColors::PAPER;
         let image_sizes = prepared_image_sizes(&raw);
         let mut pages = Vec::new();
@@ -845,12 +852,16 @@ mod tests {
                 &raw.chapter_starts,
                 &image_sizes,
                 16.0,
-                content_width(&margins),
-                content_height(&margins),
+                content_width(&margins, page_size),
+                content_height(&margins, page_size),
                 &colors,
             );
             let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
-            pages = paginate::paginate(&metrics, content_height(&margins), raw.cover.is_some());
+            pages = paginate::paginate(
+                &metrics,
+                content_height(&margins, page_size),
+                raw.cover.is_some(),
+            );
             attach_page_texts(&mut pages, &laid);
 
             let hits = crate::features::search::search(&pages, "the");

@@ -3,7 +3,7 @@ use eframe::egui::{self, Align2, Key, Modifiers};
 use crate::features::search::Hit;
 use crate::persist::{
     MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP,
-    MIN_UI_SCALE, PageMode, Settings, ThemePref,
+    MIN_UI_SCALE, PageMode, PageRatio, Settings, ThemePref,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -215,6 +215,27 @@ pub fn dialog_ui(
                     }
                 });
 
+                ui.separator();
+                ui.label("Page size");
+                ui.horizontal(|ui| {
+                    for (ratio, label) in [
+                        (PageRatio::Square, "1:1"),
+                        (PageRatio::ThreeFour, "3:4"),
+                        (PageRatio::A5, "A5"),
+                        (PageRatio::TwoThree, "2:3"),
+                        (PageRatio::FiveEight, "5:8"),
+                    ] {
+                        if ui.selectable_value(&mut draft.page_ratio, ratio, label).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.separator();
+                if ui.checkbox(&mut draft.toolbar, "Show action bar").changed() {
+                    changed = true;
+                }
+
                 if changed {
                     outcome = Outcome::Settings(*draft);
                 }
@@ -329,6 +350,8 @@ pub fn dialog_ui(
                     ("v", "Toggle a bookmark on the current page"),
                     ("Ctrl+V", "Show bookmarks"),
                     ("Ctrl+0", "Reset view"),
+                    ("Ctrl + / Ctrl =", "Zoom in on the book"),
+                    ("Ctrl -", "Zoom out on the book"),
                     ("Ctrl+C", "Copy selected text"),
                     ("c", "Copy selected text"),
                     ("f", "Find selected text"),

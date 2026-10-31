@@ -4,7 +4,6 @@ use std::sync::Arc;
 use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use crate::book::paginate::{Page, PageKind};
-use crate::canvas::grid::PAGE_SIZE;
 use crate::canvas::view::View;
 use crate::features::selection;
 use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, Margins, RULE_HEIGHT};
@@ -22,6 +21,7 @@ pub struct PageView<'a> {
     pub number: usize,
     pub font_uv: Vec2,
     pub margins: Margins,
+    pub page_size: Vec2,
     pub colors: PageColors,
     /// `(item index, char a, char b, color)` painted under the text.
     pub highlights: &'a [(usize, usize, usize, Color32)],
@@ -119,7 +119,7 @@ pub fn paint_page(
                 }
             }
             LaidKind::Rule => {
-                let width = (PAGE_SIZE.x - pv.margins.left - pv.margins.right) * zoom;
+                let width = (pv.page_size.x - pv.margins.left - pv.margins.right) * zoom;
                 let rect = Rect::from_min_size(origin, Vec2::new(width, RULE_HEIGHT * zoom));
                 painter.rect_filled(rect, 0.0, pv.colors.rule);
             }

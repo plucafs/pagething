@@ -14,6 +14,7 @@ use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
 use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
+use crate::features::toast::Toasts;
 use crate::persist::{
     BookmarkStore, Postit, PostitStore, Settings, SettingsStore, ThemePref, ViewState, ViewStore,
 };
@@ -64,6 +65,20 @@ enum ImageDecodeMessage {
     Finished,
 }
 
+#[derive(Clone, Copy)]
+enum ToolbarAction {
+    Copy,
+    Deselect,
+    Bookmark,
+    Note,
+    Search,
+    Previous,
+    Next,
+    ZoomOut,
+    ZoomReset,
+    ZoomIn,
+}
+
 pub struct PagethingApp {
     view: View,
     columns: usize,
@@ -90,6 +105,7 @@ pub struct PagethingApp {
     search_hits: Vec<Hit>,
     search_query: String,
     search_index: usize,
+    toasts: Toasts,
 }
 
 impl PagethingApp {
@@ -99,6 +115,8 @@ impl PagethingApp {
         let settings = SettingsStore::load();
         apply_theme_pref(&cc.egui_ctx, settings.settings().theme);
         cc.egui_ctx.set_zoom_factor(settings.settings().ui_scale);
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
         let mut app = Self {
             view: View::default(),
             columns: settings.settings().columns,
@@ -125,6 +143,7 @@ impl PagethingApp {
             search_hits: Vec::new(),
             search_query: String::new(),
             search_index: 0,
+            toasts: Toasts::default(),
         };
         if let Some(latest) = app.recents.first().cloned()
             && latest.exists()
@@ -212,8 +231,9 @@ impl PagethingApp {
         let has_cover = cover.is_some();
 
         let margins = Margins::uniform(settings.margin);
-        let width = layout::content_width(&margins);
-        let height = layout::content_height(&margins);
+        let page_size = grid::page_size(settings.page_ratio);
+        let width = layout::content_width(&margins, page_size);
+        let height = layout::content_height(&margins, page_size);
         let laid = layout::layout_blocks(
             ctx,
             &raw.blocks,
@@ -365,8 +385,9 @@ impl PagethingApp {
         };
         let settings = self.settings.settings();
         let margins = Margins::uniform(settings.margin);
-        let width = layout::content_width(&margins);
-        let height = layout::content_height(&margins);
+        let page_size = grid::page_size(settings.page_ratio);
+        let width = layout::content_width(&margins, page_size);
+        let height = layout::content_height(&margins, page_size);
         book.laid = layout::layout_blocks(
             ctx,
             &book.blocks,
@@ -388,7 +409,7 @@ impl PagethingApp {
         self.search_index = 0;
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
             self.want_open = true;
         }
@@ -435,15 +456,8 @@ impl PagethingApp {
         {
             self.dialog = Some(Dialog::Bookmarks);
         }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::C))
-            && let Some(sel) = &self.selection
-            && let Phase::Ready(book) = &self.phase
-            && let Some(page) = book.pages.get(sel.page)
-        {
-            let text = selection::copy_text(page, &book.laid, sel);
-            if !text.is_empty() {
-                ctx.copy_text(text);
-            }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::C)) {
+            self.copy_selection(ctx);
         }
 
         if self.dialog.is_none() && !ctx.any_popup_open() {
@@ -456,15 +470,8 @@ impl PagethingApp {
                 }
             }
             let has_selection = self.selection.is_some_and(|sel| !sel.is_empty());
-            if has_selection
-                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C))
-                && let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase)
-                && let Some(page) = book.pages.get(sel.page)
-            {
-                let text = selection::copy_text(page, &book.laid, sel);
-                if !text.is_empty() {
-                    ctx.copy_text(text);
-                }
+            if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C)) {
+                self.copy_selection(ctx);
             } else if has_selection
                 && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F))
                 && let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase)
@@ -476,8 +483,7 @@ impl PagethingApp {
                 });
                 self.pending_selection_search = Some(query);
             } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
-                self.selection = None;
-                self.selection_drag = false;
+                self.clear_selection();
             }
 
             if self.dialog.is_none() && matches!(self.phase, Phase::Ready(_)) {
@@ -498,7 +504,32 @@ impl PagethingApp {
                 }
             }
         }
-        self.view.handle_shortcuts(ctx);
+        let reset_view = ctx.input(|i| i.key_pressed(Key::Num0) && i.modifiers.ctrl);
+        if self.view.handle_shortcuts(ctx, canvas_rect) && reset_view {
+            self.toasts.show("View reset");
+        }
+    }
+
+    fn copy_selection(&mut self, ctx: &egui::Context) {
+        let text = match (&self.selection, &self.phase) {
+            (Some(sel), Phase::Ready(book)) => book
+                .pages
+                .get(sel.page)
+                .map(|page| selection::copy_text(page, &book.laid, sel))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        if !text.is_empty() {
+            ctx.copy_text(text);
+            self.toasts.show("Copied");
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        if self.selection.take().is_some() {
+            self.selection_drag = false;
+            self.toasts.show("Selection cleared");
+        }
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -604,6 +635,106 @@ impl PagethingApp {
         });
     }
 
+    fn toolbar(&mut self, ui: &mut egui::Ui) -> Option<ToolbarAction> {
+        if !self.settings.settings().toolbar || !matches!(self.phase, Phase::Ready(_)) {
+            return None;
+        }
+
+        let has_selection = self
+            .selection
+            .is_some_and(|selection| !selection.is_empty());
+        let mut action = None;
+        egui::Panel::top("action_bar").show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt("action_bar_scroll")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(has_selection, egui::Button::new("Copy"))
+                            .clicked()
+                        {
+                            action = Some(ToolbarAction::Copy);
+                        }
+                        if ui
+                            .add_enabled(has_selection, egui::Button::new("Deselect"))
+                            .clicked()
+                        {
+                            action = Some(ToolbarAction::Deselect);
+                        }
+                        if ui.button("Bookmark").clicked() {
+                            action = Some(ToolbarAction::Bookmark);
+                        }
+                        if ui.button("Note").clicked() {
+                            action = Some(ToolbarAction::Note);
+                        }
+                        if ui.button("Search").clicked() {
+                            action = Some(ToolbarAction::Search);
+                        }
+                        ui.separator();
+                        if ui.button("Prev").clicked() {
+                            action = Some(ToolbarAction::Previous);
+                        }
+                        if ui.button("Next").clicked() {
+                            action = Some(ToolbarAction::Next);
+                        }
+                        ui.separator();
+                        if ui.button("Zoom Out").clicked() {
+                            action = Some(ToolbarAction::ZoomOut);
+                        }
+                        if ui.button("Reset").clicked() {
+                            action = Some(ToolbarAction::ZoomReset);
+                        }
+                        if ui.button("Zoom In").clicked() {
+                            action = Some(ToolbarAction::ZoomIn);
+                        }
+                    });
+                    ui.add_space(2.0);
+                });
+        });
+        action
+    }
+
+    fn perform_toolbar_action(
+        &mut self,
+        action: ToolbarAction,
+        ctx: &egui::Context,
+        canvas_rect: egui::Rect,
+    ) {
+        match action {
+            ToolbarAction::Copy => self.copy_selection(ctx),
+            ToolbarAction::Deselect => self.clear_selection(),
+            ToolbarAction::Bookmark => {
+                if let Some(page) = self.current_page(canvas_rect) {
+                    self.toggle_bookmark_with_toast(page);
+                }
+            }
+            ToolbarAction::Note => {
+                if let Some(page) = self.current_page(canvas_rect) {
+                    self.dialog = Some(Dialog::Postit {
+                        page,
+                        index: None,
+                        text: String::new(),
+                    });
+                }
+            }
+            ToolbarAction::Search => {
+                self.dialog = Some(Dialog::Search {
+                    input: String::new(),
+                });
+            }
+            ToolbarAction::Previous => self.navigate_page(false, canvas_rect),
+            ToolbarAction::Next => self.navigate_page(true, canvas_rect),
+            ToolbarAction::ZoomOut => self.view.zoom_at(canvas_rect.center(), 1.0 / 1.2),
+            ToolbarAction::ZoomReset => {
+                self.view.reset_zoom_at(canvas_rect.center());
+                self.toasts.show("Zoom reset");
+            }
+            ToolbarAction::ZoomIn => self.view.zoom_at(canvas_rect.center(), 1.2),
+        }
+    }
+
     fn run_file_dialog(&mut self) {
         if !self.want_open {
             return;
@@ -631,7 +762,13 @@ impl PagethingApp {
         if page == 0 {
             return;
         }
-        let world_rect = grid::page_rect(page - 1, self.columns, self.settings.settings().page_gap);
+        let settings = self.settings.settings();
+        let world_rect = grid::page_rect(
+            page - 1,
+            self.columns,
+            settings.page_gap,
+            grid::page_size(settings.page_ratio),
+        );
         let world_center = world_rect.center();
         self.view.pan = canvas_rect.center() - world_center * self.view.zoom;
     }
@@ -641,11 +778,13 @@ impl PagethingApp {
             return None;
         };
         let center = self.view.to_world(canvas_rect.center()).to_pos2();
+        let settings = self.settings.settings();
         grid::page_index_at_or_near(
             center,
             self.columns,
-            self.settings.settings().page_gap,
+            settings.page_gap,
             book.pages.len(),
+            grid::page_size(settings.page_ratio),
         )
         .map(|index| index + 1)
     }
@@ -656,11 +795,13 @@ impl PagethingApp {
         };
         let page_count = book.pages.len();
         let center = self.view.to_world(canvas_rect.center()).to_pos2();
+        let settings = self.settings.settings();
         let Some(current) = grid::page_index_at_or_near(
             center,
             self.columns,
-            self.settings.settings().page_gap,
+            settings.page_gap,
             page_count,
+            grid::page_size(settings.page_ratio),
         ) else {
             return;
         };
@@ -711,10 +852,12 @@ impl PagethingApp {
         if !canvas_rect.contains(pos) {
             return None;
         }
-        let margins = Margins::uniform(self.settings.settings().margin);
+        let settings = self.settings.settings();
+        let margins = Margins::uniform(settings.margin);
+        let page_size = grid::page_size(settings.page_ratio);
         let world = self.view.to_world(pos);
         for (i, page) in book.pages.iter().enumerate() {
-            let world_rect = grid::page_rect(i, self.columns, self.settings.settings().page_gap);
+            let world_rect = grid::page_rect(i, self.columns, settings.page_gap, page_size);
             if !world_rect.contains(world.to_pos2()) {
                 continue;
             }
@@ -794,6 +937,7 @@ impl PagethingApp {
                 self.dialog = None;
                 self.columns = columns;
                 self.settings.update(|s| s.columns = columns);
+                self.toasts.show(format!("Columns: {columns}"));
             }
             Outcome::Search(query) => self.goto_hit(true, &query, canvas_rect, false),
             Outcome::SearchPrev => self.goto_hit(false, &search_input, canvas_rect, false),
@@ -815,12 +959,14 @@ impl PagethingApp {
                     self.postits.push(note);
                 }
                 self.save_postits();
+                self.toasts.show("Note saved");
             }
             Outcome::PostitDeleted(index) => {
                 self.dialog = None;
                 if index < self.postits.len() {
                     self.postits.remove(index);
                     self.save_postits();
+                    self.toasts.show("Note deleted");
                 }
             }
             Outcome::BookmarkOpen(page) => {
@@ -830,10 +976,12 @@ impl PagethingApp {
             Outcome::BookmarkDeleted(page) => {
                 self.bookmarks.retain(|&saved| saved != page);
                 self.save_bookmarks();
+                self.toasts.show("Bookmark removed");
             }
             Outcome::Settings(changed) => {
                 let prev = self.settings.settings();
-                let current_page = (changed.page_gap != prev.page_gap)
+                let current_page = (changed.page_gap != prev.page_gap
+                    || changed.page_ratio != prev.page_ratio)
                     .then(|| self.current_page(canvas_rect))
                     .flatten();
                 self.settings.update(|s| *s = changed);
@@ -846,6 +994,7 @@ impl PagethingApp {
                 if changed.margin != prev.margin
                     || changed.page_mode != prev.page_mode
                     || changed.font_size != prev.font_size
+                    || changed.page_ratio != prev.page_ratio
                 {
                     self.rebuild_ready_book(ctx);
                 }
@@ -878,14 +1027,26 @@ impl PagethingApp {
         self.bookmark_store.save();
     }
 
-    fn toggle_bookmark(&mut self, page: usize) {
+    fn toggle_bookmark(&mut self, page: usize) -> bool {
         if let Some(index) = self.bookmarks.iter().position(|&saved| saved == page) {
             self.bookmarks.remove(index);
+            self.save_bookmarks();
+            false
         } else {
             self.bookmarks.push(page);
             self.bookmarks.sort_unstable();
+            self.save_bookmarks();
+            true
         }
-        self.save_bookmarks();
+    }
+
+    fn toggle_bookmark_with_toast(&mut self, page: usize) {
+        let added = self.toggle_bookmark(page);
+        self.toasts.show(if added {
+            "Bookmark added"
+        } else {
+            "Bookmark removed"
+        });
     }
 
     fn paint_canvas(&mut self, ui: &mut egui::Ui) {
@@ -915,7 +1076,7 @@ impl PagethingApp {
         if std::mem::take(&mut self.pending_bookmark)
             && let Some(page) = self.current_page(canvas_rect)
         {
-            self.toggle_bookmark(page);
+            self.toggle_bookmark_with_toast(page);
         }
 
         let painter = ui.painter().with_clip_rect(canvas_rect);
@@ -989,9 +1150,10 @@ impl PagethingApp {
                 );
                 let settings = self.settings.settings();
                 let margins = Margins::uniform(settings.margin);
+                let page_size = grid::page_size(settings.page_ratio);
                 let colors = PageColors::for_mode(settings.page_mode);
                 for (i, page) in book.pages.iter().enumerate() {
-                    let world_rect = grid::page_rect(i, self.columns, settings.page_gap);
+                    let world_rect = grid::page_rect(i, self.columns, settings.page_gap, page_size);
                     let screen_rect = self.view.to_screen_rect(world_rect);
                     if !canvas_rect.intersects(screen_rect) {
                         continue;
@@ -1028,6 +1190,7 @@ impl PagethingApp {
                         number: i + 1,
                         font_uv,
                         margins,
+                        page_size,
                         colors,
                         highlights: &highlights,
                     };
@@ -1072,7 +1235,8 @@ impl PagethingApp {
                     if page_index >= book.pages.len() {
                         continue;
                     }
-                    let page_rect = grid::page_rect(page_index, self.columns, settings.page_gap);
+                    let page_rect =
+                        grid::page_rect(page_index, self.columns, settings.page_gap, page_size);
                     let zoom = self.view.zoom.max(0.01);
                     let galley = ctx.fonts_mut(|fonts| {
                         fonts.layout(
@@ -1145,12 +1309,18 @@ impl eframe::App for PagethingApp {
         let ctx = ui.ctx().clone();
         let rendering = self.text_rendering;
         ctx.all_styles_mut(|style| rendering.apply_to_visuals(&mut style.visuals));
-        self.handle_shortcuts(&ctx);
         self.menu_bar(ui);
         self.title_bar(ui);
-        self.run_file_dialog();
         self.poll_loading(&ctx);
+        let toolbar_action = self.toolbar(ui);
+        let canvas_rect = ui.available_rect_before_wrap();
+        if let Some(action) = toolbar_action {
+            self.perform_toolbar_action(action, &ctx, canvas_rect);
+        }
+        self.handle_shortcuts(&ctx, canvas_rect);
+        self.run_file_dialog();
         self.paint_canvas(ui);
+        self.toasts.paint(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -1,10 +1,12 @@
 use eframe::egui::{
-    self, Context, Event, Key, Modifiers, MouseWheelUnit, PointerButton, Rect, Response, Vec2,
+    self, Context, Event, Key, KeyboardShortcut, Modifiers, MouseWheelUnit, PointerButton, Pos2,
+    Rect, Response, Vec2,
 };
 
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 8.0;
 const WHEEL_ZOOM_STEP: f32 = 0.15;
+const KEY_ZOOM_STEP: f32 = 1.2;
 
 #[derive(Debug, Clone)]
 pub struct View {
@@ -41,10 +43,40 @@ impl View {
         *self = Self::default();
     }
 
-    pub fn handle_shortcuts(&mut self, ctx: &Context) {
+    pub fn zoom_at(&mut self, anchor: Pos2, factor: f32) {
+        let world_at_anchor = self.to_world(anchor);
+        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan = anchor.to_vec2() - world_at_anchor * self.zoom;
+    }
+
+    pub fn reset_zoom_at(&mut self, anchor: Pos2) {
+        self.zoom_at(anchor, 1.0 / self.zoom.max(MIN_ZOOM));
+    }
+
+    pub fn handle_shortcuts(&mut self, ctx: &Context, canvas_rect: Rect) -> bool {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
             self.reset();
+            return true;
         }
+
+        let zoom_in = [
+            KeyboardShortcut::new(Modifiers::CTRL, Key::Plus),
+            KeyboardShortcut::new(Modifiers::CTRL, Key::Equals),
+            KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Plus),
+        ]
+        .into_iter()
+        .any(|shortcut| ctx.input_mut(|i| i.consume_shortcut(&shortcut)));
+        if zoom_in {
+            self.zoom_at(canvas_rect.center(), KEY_ZOOM_STEP);
+            return true;
+        }
+        if ctx
+            .input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::Minus)))
+        {
+            self.zoom_at(canvas_rect.center(), 1.0 / KEY_ZOOM_STEP);
+            return true;
+        }
+        false
     }
 
     pub fn handle_input(&mut self, ctx: &Context, canvas_rect: Rect, response: &Response) {
@@ -83,10 +115,42 @@ impl View {
         if line_scroll.y != 0.0
             && let Some(cursor) = pointer_pos
         {
-            let world_at_cursor = self.to_world(cursor);
-            self.zoom =
-                (self.zoom * (1.0 + line_scroll.y * WHEEL_ZOOM_STEP)).clamp(MIN_ZOOM, MAX_ZOOM);
-            self.pan = cursor.to_vec2() - world_at_cursor * self.zoom;
+            self.zoom_at(cursor, 1.0 + line_scroll.y * WHEEL_ZOOM_STEP);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_keeps_the_world_point_under_anchor_fixed() {
+        let mut view = View {
+            pan: Vec2::new(73.0, -22.0),
+            zoom: 1.4,
+        };
+        let anchor = Pos2::new(310.0, 180.0);
+        let world_before = view.to_world(anchor);
+
+        view.zoom_at(anchor, 1.2);
+
+        assert!((view.zoom - 1.68).abs() < 1e-5);
+        assert!((view.to_world(anchor) - world_before).length() < 1e-4);
+    }
+
+    #[test]
+    fn reset_zoom_keeps_pan_anchor_and_sets_zoom_to_one() {
+        let mut view = View {
+            pan: Vec2::new(-80.0, 125.0),
+            zoom: 2.4,
+        };
+        let anchor = Pos2::new(200.0, 260.0);
+        let world_before = view.to_world(anchor);
+
+        view.reset_zoom_at(anchor);
+
+        assert_eq!(view.zoom, 1.0);
+        assert!((view.to_world(anchor) - world_before).length() < 1e-4);
     }
 }
