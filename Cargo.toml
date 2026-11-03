@@ -16,3 +16,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+limn-dnd = "0.1"

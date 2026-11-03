@@ -1610,6 +1610,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "limn-dnd"
+version = "0.1.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9b6101d3268da4985d10a2357be2ae756a1ccd8350f6383077fd536c8aa9427"
+dependencies = [
+ "raw-window-handle",
+ "smithay-client-toolkit 0.20.0",
+ "wayland-backend",
+]
+
+[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2181,6 +2192,7 @@ dependencies = [
  "fastframe-text",
  "htmd",
  "image",
+ "limn-dnd",
  "pulldown-cmark",
  "rbook",
  "rfd",

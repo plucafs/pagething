@@ -110,6 +110,8 @@ pub struct PagethingApp {
     search_query: String,
     search_index: usize,
     toasts: Toasts,
+    wayland_dnd: Option<limn_dnd::FileDnd>,
+    wayland_hover: bool,
 }
 
 impl PagethingApp {
@@ -150,6 +152,16 @@ impl PagethingApp {
             search_query: String::new(),
             search_index: 0,
             toasts: Toasts::default(),
+            wayland_dnd: {
+                #[cfg(target_os = "linux")]
+                {
+                    let ctx = cc.egui_ctx.clone();
+                    limn_dnd::FileDnd::attach(cc, move || ctx.request_repaint())
+                }
+                #[cfg(not(target_os = "linux"))]
+                None
+            },
+            wayland_hover: false,
         };
         app.recent_titles.ensure(&app.recents);
         if let Some(arg) = std::env::args().nth(1) {
@@ -788,6 +800,76 @@ impl PagethingApp {
         }
     }
 
+    fn handle_file_drop(&mut self, ctx: &egui::Context) {
+        let mut paths: Vec<PathBuf> = ctx
+            .input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if let Some(dnd) = &self.wayland_dnd {
+            for event in dnd.poll() {
+                match event {
+                    limn_dnd::DndEvent::Hovered { .. } => self.wayland_hover = true,
+                    limn_dnd::DndEvent::Left => self.wayland_hover = false,
+                    limn_dnd::DndEvent::Dropped { paths: dropped, .. } => {
+                        self.wayland_hover = false;
+                        paths.extend(dropped);
+                    }
+                    limn_dnd::DndEvent::DragEnded => {}
+                }
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let mut opened = false;
+        let mut ignored = 0usize;
+        for path in paths {
+            let is_epub = path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("epub"));
+            if is_epub && !opened {
+                opened = true;
+                self.remember(path.clone());
+                self.open_path(path);
+            } else {
+                ignored += 1;
+            }
+        }
+        if !opened {
+            self.toasts.show("Only .epub files can be opened");
+        } else if ignored > 0 {
+            self.toasts
+                .show(format!("Opened one book; ignored {ignored} other file(s)"));
+        }
+    }
+
+    fn paint_drop_hover(&self, ui: &egui::Ui, canvas_rect: egui::Rect) {
+        let winit_hover = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+        if !winit_hover && !self.wayland_hover {
+            return;
+        }
+        let color = theme::hint_color(ui.ctx().theme());
+        let fill = Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 28);
+        let painter = ui.painter().with_clip_rect(canvas_rect);
+        painter.rect_filled(canvas_rect, 0.0, fill);
+        painter.rect_stroke(
+            canvas_rect,
+            4.0,
+            egui::Stroke::new(2.0, color),
+            egui::StrokeKind::Inside,
+        );
+        let galley = ui.ctx().fonts_mut(|f| {
+            f.layout(
+                "Drop EPUB to open".to_owned(),
+                egui::FontId::proportional(18.0),
+                color,
+                (canvas_rect.width() * 0.8).max(120.0),
+            )
+        });
+        let pos = canvas_rect.center() - galley.size() / 2.0;
+        painter.galley(pos, galley, color);
+    }
+
     fn jump_to_page(&mut self, page: usize, canvas_rect: egui::Rect) {
         if page == 0 {
             return;
@@ -1392,12 +1474,16 @@ impl eframe::App for PagethingApp {
         }
         self.handle_shortcuts(&ctx, canvas_rect);
         self.run_file_dialog();
+        self.handle_file_drop(&ctx);
         self.paint_canvas(ui);
+        self.paint_drop_hover(ui, canvas_rect);
         self.toasts.paint(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stash_view();
+        // Window must outlive FileDnd; join the worker while it still exists.
+        self.wayland_dnd = None;
     }
 }
 
