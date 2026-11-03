@@ -91,6 +91,7 @@ pub enum PageMode {
     #[default]
     Paper,
     DarkPages,
+    Sepia,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -483,6 +484,15 @@ mod tests {
         .unwrap();
         assert!(json.contains("\"theme\":\"light\""));
         assert!(json.contains("\"page_mode\":\"dark_pages\""));
+
+        let json = serde_json::to_string(&Settings {
+            page_mode: PageMode::Sepia,
+            ..Settings::default()
+        })
+        .unwrap();
+        assert!(json.contains("\"page_mode\":\"sepia\""));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.page_mode, PageMode::Sepia);
     }
 
     #[test]

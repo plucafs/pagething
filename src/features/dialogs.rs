@@ -226,6 +226,7 @@ pub fn dialog_ui(
                     for (mode, label) in [
                         (PageMode::Paper, "Light"),
                         (PageMode::DarkPages, "Dark"),
+                        (PageMode::Sepia, "Sepia"),
                     ] {
                         if ui
                             .selectable_value(&mut draft.page_mode, mode, label)

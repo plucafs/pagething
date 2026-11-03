@@ -801,8 +801,13 @@ impl PagethingApp {
     }
 
     fn handle_file_drop(&mut self, ctx: &egui::Context) {
-        let mut paths: Vec<PathBuf> = ctx
-            .input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        let mut paths: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
         if let Some(dnd) = &self.wayland_dnd {
             for event in dnd.poll() {
                 match event {

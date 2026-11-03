@@ -34,10 +34,21 @@ impl PageColors {
         rule: Color32::from_gray(90),
     };
 
+    pub const SEPIA: Self = Self {
+        bg: Color32::from_rgb(245, 236, 215),
+        border: Color32::from_rgb(176, 154, 123),
+        body: Color32::from_rgb(74, 56, 40),
+        heading: Color32::from_rgb(56, 40, 28),
+        code_bg: Color32::from_rgb(233, 220, 196),
+        page_number: Color32::from_rgb(130, 110, 88),
+        rule: Color32::from_rgb(186, 166, 136),
+    };
+
     pub const fn for_mode(mode: PageMode) -> Self {
         match mode {
             PageMode::Paper => Self::PAPER,
             PageMode::DarkPages => Self::DARK_PAGES,
+            PageMode::Sepia => Self::SEPIA,
         }
     }
 }
@@ -91,12 +102,23 @@ mod tests {
     }
 
     #[test]
+    fn sepia_palette_is_dark_text_on_warm_page() {
+        let c = PageColors::SEPIA;
+        assert!(gray(c.bg) > gray(c.body));
+        assert!(gray(c.bg) > gray(c.heading));
+        assert!(gray(c.bg) < 255, "sepia should not be pure white");
+        // warmer (more red than blue) than paper
+        assert!(c.bg.r() > c.bg.b(), "sepia bg should be warm");
+    }
+
+    #[test]
     fn for_mode_maps_settings() {
         assert_eq!(PageColors::for_mode(PageMode::Paper), PageColors::PAPER);
         assert_eq!(
             PageColors::for_mode(PageMode::DarkPages),
             PageColors::DARK_PAGES
         );
+        assert_eq!(PageColors::for_mode(PageMode::Sepia), PageColors::SEPIA);
     }
 
     #[test]
