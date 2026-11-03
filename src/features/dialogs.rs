@@ -1,9 +1,12 @@
-use eframe::egui::{self, Align2, Key, Modifiers};
+use std::path::PathBuf;
 
+use eframe::egui::{self, Align2, CursorIcon, Key, Modifiers, Sense};
+
+use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
     MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP,
-    MIN_UI_SCALE, PageMode, PageRatio, Settings, ThemePref,
+    MIN_UI_SCALE, PageMode, PageRatio, Settings, ThemePref, TitleStore,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -28,6 +31,10 @@ pub enum Dialog {
         text: String,
     },
     Bookmarks,
+    Recents {
+        editing: Option<usize>,
+        draft: String,
+    },
     Shortcuts,
     Help,
 }
@@ -50,6 +57,15 @@ pub enum Outcome {
     PostitDeleted(usize),
     BookmarkOpen(usize),
     BookmarkDeleted(usize),
+    OpenRecent {
+        path: PathBuf,
+        new_window: bool,
+    },
+    RenameRecent {
+        path: PathBuf,
+        title: String,
+    },
+    RemoveRecent(PathBuf),
 }
 
 pub fn parse_jump(input: &str, page_count: usize) -> Option<usize> {
@@ -65,12 +81,16 @@ pub fn parse_columns(input: &str) -> Option<usize> {
     Some(n.clamp(1, MAX_COLUMNS))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dialog_ui(
     ctx: &egui::Context,
     dialog: &mut Dialog,
     page_count: usize,
     hits: &[Hit],
     bookmarks: &[usize],
+    recents: &[PathBuf],
+    titles: &TitleLoader,
+    custom_titles: &TitleStore,
 ) -> Outcome {
     let mut outcome = Outcome::Keep;
 
@@ -87,6 +107,7 @@ pub fn dialog_ui(
             }
         }
         Dialog::Bookmarks => "Bookmarks",
+        Dialog::Recents { .. } => "Recent books",
         Dialog::Shortcuts => "Shortcuts",
         Dialog::Help => "About pagething",
     };
@@ -337,9 +358,142 @@ pub fn dialog_ui(
                     outcome = Outcome::Close;
                 }
             }
+            Dialog::Recents { editing, draft } => {
+                const LIST_WIDTH: f32 = 420.0;
+                const LIST_HEIGHT: f32 = 480.0;
+                const ROW_HEIGHT: f32 = 36.0;
+                const TEXT_HEIGHT: f32 = 18.0;
+                const EDIT_WIDTH: f32 = 24.0;
+                const REMOVE_WIDTH: f32 = 20.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(LIST_WIDTH, LIST_HEIGHT),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(LIST_HEIGHT)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if recents.is_empty() {
+                                    ui.label("No recent books yet. Press Ctrl+O to open one.");
+                                    return;
+                                }
+                                for (index, path) in recents.iter().enumerate() {
+                                    let display = custom_titles
+                                        .get(path)
+                                        .map(str::to_owned)
+                                        .or_else(|| titles.title(path).map(str::to_owned))
+                                        .unwrap_or_else(|| {
+                                            path.file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|| path.display().to_string())
+                                        });
+                                    let row_width = ui.available_width();
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::vec2(row_width, ROW_HEIGHT),
+                                        Sense::click(),
+                                    );
+                                    if response.hovered() {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            4.0,
+                                            ui.visuals().faint_bg_color,
+                                        );
+                                    }
+                                    let response =
+                                        response.on_hover_cursor(CursorIcon::PointingHand);
+                                    let edit_rect = egui::Rect::from_min_size(
+                                        egui::pos2(
+                                            rect.max.x
+                                                - 8.0
+                                                - REMOVE_WIDTH
+                                                - 4.0
+                                                - EDIT_WIDTH,
+                                            rect.center().y - 10.0,
+                                        ),
+                                        egui::vec2(EDIT_WIDTH, 20.0),
+                                    );
+                                    let edit_button = ui
+                                        .put(edit_rect, egui::Button::new("✏️").small())
+                                        .on_hover_text("Rename");
+                                    if edit_button.clicked() {
+                                        *editing = Some(index);
+                                        *draft = display.clone();
+                                    }
+                                    let remove_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect.max.x - 8.0 - REMOVE_WIDTH, rect.center().y - 10.0),
+                                        egui::vec2(REMOVE_WIDTH, 20.0),
+                                    );
+                                    let remove_button = ui
+                                        .put(remove_rect, egui::Button::new("x").small())
+                                        .on_hover_text("Remove from recent books");
+                                    if remove_button.clicked() {
+                                        outcome = Outcome::RemoveRecent(path.clone());
+                                    }
+                                    if response.clicked() {
+                                        if editing.is_some() {
+                                            *editing = None;
+                                        } else {
+                                            let new_window = ui.input(|i| {
+                                                i.modifiers.ctrl || i.modifiers.command
+                                            });
+                                            outcome = Outcome::OpenRecent {
+                                                path: path.clone(),
+                                                new_window,
+                                            };
+                                        }
+                                    }
+                                    let text_rect = egui::Rect::from_min_size(
+                                        rect.min + egui::vec2(
+                                            8.0,
+                                            (ROW_HEIGHT - TEXT_HEIGHT) / 2.0,
+                                        ),
+                                        egui::vec2(
+                                            rect.width() - 16.0 - EDIT_WIDTH - REMOVE_WIDTH - 10.0,
+                                            TEXT_HEIGHT,
+                                        ),
+                                    );
+                                    if *editing == Some(index) {
+                                        let edit = ui.put(
+                                            text_rect,
+                                            egui::TextEdit::singleline(draft)
+                                                .desired_width(text_rect.width()),
+                                        );
+                                        edit.request_focus();
+                                    } else {
+                                        ui.put(
+                                            text_rect,
+                                            egui::Label::new(display)
+                                                .halign(egui::Align::Min)
+                                                .truncate()
+                                                .selectable(false),
+                                        );
+                                    }
+                                }
+                            });
+                    },
+                );
+                if ui.input(|i| i.key_pressed(Key::Enter))
+                    && let Some(index) = *editing
+                    && let Some(path) = recents.get(index)
+                {
+                    outcome = Outcome::RenameRecent {
+                        path: path.clone(),
+                        title: draft.clone(),
+                    };
+                    *editing = None;
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    if editing.is_some() {
+                        *editing = None;
+                    } else {
+                        outcome = Outcome::Close;
+                    }
+                }
+            }
             Dialog::Shortcuts => {
                 let keyboard = [
                     ("Ctrl+O", "Open EPUB"),
+                    ("Ctrl+R", "Recent books"),
                     ("Ctrl+N", "Open a new window"),
                     ("Ctrl+Q", "Quit"),
                     ("Ctrl+G", "Go to page"),

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -12,11 +12,13 @@ use crate::book::prepare::{self, PreparedBook};
 use crate::book::progress::{LoadProgress, LoadStage};
 use crate::canvas::{View, grid};
 use crate::features::dialogs::{self, Dialog, Outcome};
+use crate::features::recents::TitleLoader;
 use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
 use crate::features::toast::Toasts;
 use crate::persist::{
-    BookmarkStore, Postit, PostitStore, Settings, SettingsStore, ThemePref, ViewState, ViewStore,
+    BookmarkStore, Postit, PostitStore, Settings, SettingsStore, ThemePref, TitleStore, ViewState,
+    ViewStore,
 };
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
@@ -84,6 +86,8 @@ pub struct PagethingApp {
     columns: usize,
     phase: Phase,
     recents: Vec<PathBuf>,
+    recent_titles: TitleLoader,
+    title_store: TitleStore,
     want_open: bool,
     display_cache: DisplayCache,
     view_store: ViewStore,
@@ -122,6 +126,8 @@ impl PagethingApp {
             columns: settings.settings().columns,
             phase: Phase::Empty { error: None },
             recents: load_recents(),
+            recent_titles: TitleLoader::new(),
+            title_store: TitleStore::load(),
             want_open: false,
             display_cache: DisplayCache::default(),
             view_store: ViewStore::load(),
@@ -145,6 +151,15 @@ impl PagethingApp {
             search_index: 0,
             toasts: Toasts::default(),
         };
+        app.recent_titles.ensure(&app.recents);
+        if let Some(arg) = std::env::args().nth(1) {
+            let path = PathBuf::from(arg);
+            if path.exists() {
+                app.remember(path.clone());
+                app.open_path(path);
+                return app;
+            }
+        }
         if let Some(latest) = app.recents.first().cloned()
             && latest.exists()
         {
@@ -212,6 +227,7 @@ impl PagethingApp {
         self.recents.insert(0, path);
         self.recents.truncate(MAX_RECENTS);
         save_recents(&self.recents);
+        self.recent_titles.ensure(&self.recents);
     }
 
     fn build_book(ctx: &egui::Context, raw: PreparedBook, settings: Settings) -> LoadedBook {
@@ -319,6 +335,13 @@ impl PagethingApp {
         }
     }
 
+    fn poll_recent_titles(&mut self, ctx: &egui::Context) {
+        self.recent_titles.poll();
+        if matches!(self.dialog, Some(Dialog::Recents { .. })) && self.recent_titles.pending() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
+    }
+
     fn poll_loading(&mut self, ctx: &egui::Context) {
         let prepared = match &mut self.phase {
             Phase::Loading { prepared, .. } => prepared.take(),
@@ -413,8 +436,19 @@ impl PagethingApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
             self.want_open = true;
         }
+        if dialogs::consume_shortcut(ctx, Key::R) {
+            if matches!(self.dialog, Some(Dialog::Recents { .. })) {
+                self.dialog = None;
+            } else {
+                self.dialog = Some(Dialog::Recents {
+                    editing: None,
+                    draft: String::new(),
+                });
+                self.recent_titles.ensure(&self.recents);
+            }
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::N)) {
-            spawn_new_instance();
+            spawn_new_instance(None);
         }
         if dialogs::consume_shortcut(ctx, Key::G) && matches!(self.phase, Phase::Ready(_)) {
             self.dialog = Some(Dialog::Jump {
@@ -545,7 +579,7 @@ impl PagethingApp {
                         .clicked()
                     {
                         ui.close();
-                        spawn_new_instance();
+                        spawn_new_instance(None);
                     }
                     ui.add_enabled_ui(!self.recents.is_empty(), |ui| {
                         ui.menu_button("Recent", |ui| {
@@ -623,7 +657,12 @@ impl PagethingApp {
         let Phase::Ready(book) = &self.phase else {
             return;
         };
-        let Some(title) = book.title.clone() else {
+        let title = self
+            .current_book
+            .as_deref()
+            .and_then(|path| self.title_store.get(path).map(str::to_owned))
+            .or_else(|| book.title.clone());
+        let Some(title) = title else {
             return;
         };
         egui::Panel::top("book_title").show(ui, |ui| {
@@ -917,8 +956,16 @@ impl PagethingApp {
             Dialog::Search { input } => input.clone(),
             _ => String::new(),
         };
-        let outcome =
-            dialogs::dialog_ui(ctx, dialog, page_count, &self.search_hits, &self.bookmarks);
+        let outcome = dialogs::dialog_ui(
+            ctx,
+            dialog,
+            page_count,
+            &self.search_hits,
+            &self.bookmarks,
+            &self.recents,
+            &self.recent_titles,
+            &self.title_store,
+        );
         match outcome {
             Outcome::Keep => {}
             Outcome::Close => {
@@ -977,6 +1024,31 @@ impl PagethingApp {
                 self.bookmarks.retain(|&saved| saved != page);
                 self.save_bookmarks();
                 self.toasts.show("Bookmark removed");
+            }
+            Outcome::OpenRecent { path, new_window } => {
+                self.dialog = None;
+                self.remember(path.clone());
+                if new_window {
+                    spawn_new_instance(Some(&path));
+                } else {
+                    self.open_path(path);
+                }
+            }
+            Outcome::RenameRecent { path, title } => {
+                let title = title.trim().to_owned();
+                if title.is_empty() {
+                    self.title_store.remove(&path);
+                } else {
+                    self.title_store.set(&path, title);
+                }
+                self.title_store.save();
+            }
+            Outcome::RemoveRecent(path) => {
+                self.recents.retain(|p| p != &path);
+                save_recents(&self.recents);
+                if let Dialog::Recents { editing, .. } = dialog {
+                    *editing = None;
+                }
             }
             Outcome::Settings(changed) => {
                 let prev = self.settings.settings();
@@ -1095,13 +1167,13 @@ impl PagethingApp {
                         theme::hint_color(ui.ctx().theme()),
                     ),
                 };
-                painter.text(
-                    canvas_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    message,
-                    egui::FontId::proportional(18.0),
-                    color,
-                );
+                let font_id = egui::FontId::proportional(18.0);
+                let wrap_width = (canvas_rect.width() * 0.8).max(120.0);
+                let galley = ui
+                    .ctx()
+                    .fonts_mut(|f| f.layout(message, font_id, color, wrap_width));
+                let pos = canvas_rect.center() - galley.size() / 2.0;
+                painter.galley(pos, galley, color);
             }
             Phase::Loading { progress, .. } => {
                 let center = canvas_rect.center();
@@ -1312,6 +1384,7 @@ impl eframe::App for PagethingApp {
         self.menu_bar(ui);
         self.title_bar(ui);
         self.poll_loading(&ctx);
+        self.poll_recent_titles(&ctx);
         let toolbar_action = self.toolbar(ui);
         let canvas_rect = ui.available_rect_before_wrap();
         if let Some(action) = toolbar_action {
@@ -1328,9 +1401,13 @@ impl eframe::App for PagethingApp {
     }
 }
 
-fn spawn_new_instance() {
+fn spawn_new_instance(path: Option<&Path>) {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+        let mut command = std::process::Command::new(exe);
+        if let Some(path) = path {
+            command.arg(path);
+        }
+        let _ = command.spawn();
     }
 }
 

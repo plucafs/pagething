@@ -228,6 +228,55 @@ impl ViewStore {
     }
 }
 
+/// User-assigned display titles for books, keyed by canonical path.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TitleStore {
+    #[serde(skip)]
+    path: PathBuf,
+    titles: HashMap<String, String>,
+}
+
+impl TitleStore {
+    pub fn load() -> Self {
+        let path = dirs::config_dir()
+            .map(|d| d.join("pagething").join("titles.json"))
+            .unwrap_or_default();
+        Self::load_from(path)
+    }
+
+    pub fn load_from(path: PathBuf) -> Self {
+        let titles = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, titles }
+    }
+
+    pub fn get(&self, book: &Path) -> Option<&str> {
+        self.titles.get(&book_key(book)).map(String::as_str)
+    }
+
+    pub fn set(&mut self, book: &Path, title: String) {
+        self.titles.insert(book_key(book), title);
+    }
+
+    pub fn remove(&mut self, book: &Path) {
+        self.titles.remove(&book_key(book));
+    }
+
+    pub fn save(&self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&self.titles) {
+            let _ = std::fs::write(&self.path, json);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Postit {
     pub page: usize,
@@ -322,6 +371,28 @@ mod tests {
     fn missing_file_yields_empty_store() {
         let store = ViewStore::load_from(PathBuf::from("/nonexistent-xyz/views.json"));
         assert_eq!(store.get(Path::new("/book.epub")), None);
+    }
+
+    #[test]
+    fn title_store_roundtrips_and_removes() {
+        let dir = std::env::temp_dir().join(format!("pagething-titles-{}", std::process::id()));
+        let path = dir.join("titles.json");
+        let book = PathBuf::from("/tmp/renamed-book.epub");
+
+        let mut store = TitleStore::load_from(path.clone());
+        store.set(&book, "My Custom Title".to_owned());
+        store.save();
+
+        let mut reloaded = TitleStore::load_from(path.clone());
+        assert_eq!(reloaded.get(&book), Some("My Custom Title"));
+        assert_eq!(reloaded.get(Path::new("/tmp/other.epub")), None);
+
+        reloaded.remove(&book);
+        reloaded.save();
+        let cleared = TitleStore::load_from(path);
+        assert_eq!(cleared.get(&book), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
