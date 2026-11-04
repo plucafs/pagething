@@ -1,0 +1,1 @@
+git log $(git describe --tags --abbrev=0 HEAD^)..HEAD --pretty=format:'- %s' 2>/dev/null || git log --pretty=format:'- %s'
