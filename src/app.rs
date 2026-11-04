@@ -827,6 +827,7 @@ impl PagethingApp {
                         updated_at: 0,
                         replies: Vec::new(),
                         reply_draft: String::new(),
+                        scroll_replies_bottom: false,
                     });
                 }
             }
@@ -1205,12 +1206,14 @@ impl PagethingApp {
                         replies: dialog_replies,
                         reply_draft,
                         updated_at,
+                        scroll_replies_bottom,
                         ..
                     }) = &mut self.dialog
                     {
                         *dialog_replies = replies;
                         *updated_at = now;
                         reply_draft.clear();
+                        *scroll_replies_bottom = true;
                     }
                     self.toasts.show("Reply added");
                 }
@@ -1395,6 +1398,7 @@ impl PagethingApp {
                 updated_at: 0,
                 replies: Vec::new(),
                 reply_draft: String::new(),
+                scroll_replies_bottom: false,
             });
         }
         if std::mem::take(&mut self.pending_bookmark)
@@ -1646,18 +1650,20 @@ impl PagethingApp {
                             .map(|g| g.size().y / zoom + 4.0)
                             .unwrap_or(0.0);
                         let replies_h: f32 = replies.iter().map(|g| g.size().y / zoom + 3.0).sum();
+                        // No upper cap — every reply is painted under the note.
                         let h = (header_row_h
                             + header_h
                             + body.size().y / zoom
                             + meta_h
                             + replies_h
                             + 16.0)
-                            .clamp(48.0, 336.0);
+                            .max(48.0);
                         (header, Some(body), meta, replies, h)
                     };
 
                     let width = if collapsed { 28.0 } else { 160.0 };
-                    let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 8.0);
+                    // Start below the bookmark icon (page.min + 12..31).
+                    let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 40.0);
                     let world_rect = egui::Rect::from_min_size(
                         egui::pos2(page_rect.max.x + 8.0, *y),
                         egui::vec2(width, height),
@@ -1869,6 +1875,7 @@ impl PagethingApp {
                             updated_at: note.updated_at,
                             replies: note.replies.clone(),
                             reply_draft: String::new(),
+                            scroll_replies_bottom: false,
                         });
                     }
                 }

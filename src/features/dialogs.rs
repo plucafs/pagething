@@ -33,6 +33,8 @@ pub enum Dialog {
         updated_at: u64,
         replies: Vec<Reply>,
         reply_draft: String,
+        /// Set after adding a reply so the list scrolls to the bottom once.
+        scroll_replies_bottom: bool,
     },
     Bookmarks,
     Recents {
@@ -320,6 +322,7 @@ pub fn dialog_ui(
                 updated_at,
                 replies,
                 reply_draft,
+                scroll_replies_bottom,
             } => {
                 ui.label(format!("Page {page}"));
                 if *created_at > 0 {
@@ -366,11 +369,15 @@ pub fn dialog_ui(
                 if !replies.is_empty() || index.is_some() {
                     ui.separator();
                     ui.label(egui::RichText::new("Replies").strong().small());
+                    // Fixed width so long replies wrap instead of widening the window.
+                    let list_width = 320.0;
                     egui::ScrollArea::vertical()
+                        .id_salt("postit_replies")
                         .max_height(140.0)
+                        .stick_to_bottom(*scroll_replies_bottom)
                         .show(ui, |ui| {
                             for (reply_index, reply) in replies.iter().enumerate() {
-                                ui.horizontal(|ui| {
+                                ui.horizontal_top(|ui| {
                                     if let Some(index) = index
                                         && ui
                                             .small_button("x")
@@ -382,30 +389,7 @@ pub fn dialog_ui(
                                             reply_index,
                                         };
                                     }
-                                    ui.label(
-                                        egui::RichText::new(fmt_ts(reply.created_at))
-                                            .weak()
-                                            .small(),
-                                    );
                                     let copy_w = 48.0;
-                                    let text_w =
-                                        (ui.available_width() - copy_w - 8.0).max(48.0);
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(text_w, ui.spacing().interact_size.y),
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(reply.text.clone())
-                                                        .font(
-                                                            crate::render::fonts::book(14.0),
-                                                        ),
-                                                )
-                                                .truncate()
-                                                .selectable(false),
-                                            );
-                                        },
-                                    );
                                     if ui
                                         .add_sized(
                                             [copy_w, ui.spacing().interact_size.y],
@@ -415,9 +399,38 @@ pub fn dialog_ui(
                                     {
                                         ctx.copy_text(reply.text.clone());
                                     }
+                                    ui.label(
+                                        egui::RichText::new(fmt_ts(reply.created_at))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    // Full text, wrapped to a fixed width (no truncate).
+                                    let text_w = (list_width - copy_w - 40.0).max(80.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(text_w, ui.spacing().interact_size.y),
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(reply.text.clone())
+                                                        .font(
+                                                            crate::render::fonts::book(14.0),
+                                                        ),
+                                                )
+                                                .wrap()
+                                                .selectable(false),
+                                            );
+                                        },
+                                    );
                                 });
                             }
+                            if *scroll_replies_bottom {
+                                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                            }
                         });
+                    if *scroll_replies_bottom {
+                        *scroll_replies_bottom = false;
+                    }
                     if let Some(index) = index {
                         let reply_resp = ui.add(
                             egui::TextEdit::multiline(reply_draft)
