@@ -6,12 +6,21 @@ use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, Str
 use crate::book::paginate::{Page, PageKind};
 use crate::canvas::view::View;
 use crate::features::selection;
+use crate::persist::PageMode;
 use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, Margins, RULE_HEIGHT};
 use crate::render::theme::PageColors;
 
 pub const SEARCH_HL: Color32 = Color32::from_rgba_premultiplied(140, 112, 33, 140);
 pub const SEARCH_CURRENT_HL: Color32 = Color32::from_rgba_premultiplied(190, 70, 15, 180);
 pub const SELECTION_HL: Color32 = Color32::from_rgba_premultiplied(26, 60, 110, 110);
+
+/// User highlight wash: visible on light pages, muted on dark pages.
+pub fn user_hl(mode: PageMode) -> Color32 {
+    match mode {
+        PageMode::DarkPages => Color32::from_rgba_premultiplied(130, 118, 70, 110),
+        PageMode::Paper | PageMode::Sepia => Color32::from_rgba_premultiplied(255, 230, 90, 110),
+    }
+}
 
 pub struct PageView<'a> {
     pub page: &'a Page,

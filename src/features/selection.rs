@@ -208,6 +208,17 @@ pub fn selection_spans(page: &Page, sel: &Selection) -> Vec<(usize, usize, usize
     out
 }
 
+/// Selection range as `(start, end)` char offsets into `page.plain_text`.
+pub fn selection_offsets(page: &Page, sel: &Selection) -> Option<(usize, usize)> {
+    let (a, b) = sel.range();
+    let to_plain = |loc: &Loc| -> Option<usize> {
+        let item = page.items.get(loc.item)?;
+        let seg = page.segments.iter().find(|s| s.block == item.block)?;
+        Some(seg.start + loc.char)
+    };
+    Some((to_plain(&a)?, to_plain(&b)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +390,51 @@ mod tests {
         };
         assert_eq!(piece_ranges(&page, 3, 8), vec![(0, 3, 5), (1, 0, 2)]);
         assert!(piece_ranges(&page, 4, 4).is_empty());
+    }
+
+    #[test]
+    fn selection_offsets_map_locs_to_plain_text() {
+        let page = Page {
+            kind: PageKind::Content,
+            items: vec![
+                PageItem {
+                    block: 3,
+                    row_start: 0,
+                    row_end: 2,
+                    y: 0.0,
+                },
+                PageItem {
+                    block: 4,
+                    row_start: 0,
+                    row_end: 2,
+                    y: 50.0,
+                },
+            ],
+            plain_text: "hello\nworld".to_owned(),
+            segments: vec![
+                TextSegment {
+                    block: 3,
+                    start: 0,
+                    end: 5,
+                },
+                TextSegment {
+                    block: 4,
+                    start: 6,
+                    end: 11,
+                },
+            ],
+        };
+        let sel = Selection {
+            page: 0,
+            anchor: Loc { item: 0, char: 1 },
+            cursor: Loc { item: 1, char: 3 },
+        };
+        assert_eq!(selection_offsets(&page, &sel), Some((1, 9)));
+        let missing = Selection {
+            page: 0,
+            anchor: Loc { item: 9, char: 0 },
+            cursor: Loc { item: 9, char: 1 },
+        };
+        assert_eq!(selection_offsets(&page, &missing), None);
     }
 }

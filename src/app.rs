@@ -17,8 +17,8 @@ use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
 use crate::features::toast::Toasts;
 use crate::persist::{
-    BookmarkStore, Postit, PostitStore, Settings, SettingsStore, ThemePref, TitleStore, ViewState,
-    ViewStore,
+    BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Settings, SettingsStore,
+    ThemePref, TitleStore, ViewState, ViewStore, unix_now,
 };
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
@@ -93,8 +93,10 @@ pub struct PagethingApp {
     view_store: ViewStore,
     postit_store: PostitStore,
     bookmark_store: BookmarkStore,
+    highlight_store: HighlightStore,
     postits: Vec<Postit>,
     bookmarks: Vec<usize>,
+    highlights: Vec<Highlight>,
     settings: SettingsStore,
     current_book: Option<PathBuf>,
     dialog: Option<Dialog>,
@@ -135,8 +137,10 @@ impl PagethingApp {
             view_store: ViewStore::load(),
             postit_store: PostitStore::load("postits.json"),
             bookmark_store: BookmarkStore::load("bookmarks.json"),
+            highlight_store: HighlightStore::load("highlights.json"),
             postits: Vec::new(),
             bookmarks: Vec::new(),
+            highlights: Vec::new(),
             settings,
             current_book: None,
             dialog: None,
@@ -190,6 +194,7 @@ impl PagethingApp {
         self.search_index = 0;
         self.postits = self.postit_store.get(&path).to_vec();
         self.bookmarks = self.bookmark_store.get(&path).to_vec();
+        self.highlights = self.highlight_store.get(&path).to_vec();
         self.view = self
             .view_store
             .get(&path)
@@ -516,7 +521,9 @@ impl PagethingApp {
                 }
             }
             let has_selection = self.selection.is_some_and(|sel| !sel.is_empty());
-            if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C)) {
+            if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::H)) {
+                self.highlight_selection();
+            } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C)) {
                 self.copy_selection(ctx);
             } else if has_selection
                 && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F))
@@ -576,6 +583,49 @@ impl PagethingApp {
             self.selection_drag = false;
             self.toasts.show("Selection cleared");
         }
+    }
+
+    /// `H`: toggle a persistent underline on the selection; when adding,
+    /// also create a post-it containing the selected text (independent records).
+    fn highlight_selection(&mut self) {
+        let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase) else {
+            return;
+        };
+        let Some(page) = book.pages.get(sel.page) else {
+            return;
+        };
+        let Some((start, end)) = selection::selection_offsets(page, sel) else {
+            return;
+        };
+        let page_1based = sel.page + 1;
+        if let Some(pos) = self
+            .highlights
+            .iter()
+            .position(|h| h.page == page_1based && h.start == start && h.end == end)
+        {
+            self.highlights.remove(pos);
+            self.save_highlights();
+            self.toasts.show("Highlight removed");
+            return;
+        }
+        let text = selection::copy_text(page, &book.laid, sel);
+        self.highlights.push(Highlight {
+            page: page_1based,
+            start,
+            end,
+            created_at: unix_now(),
+        });
+        self.save_highlights();
+        if !text.trim().is_empty() {
+            self.postits.push(Postit {
+                page: page_1based,
+                text,
+                highlight: Some((start, end)),
+            });
+            self.save_postits();
+        }
+        self.clear_selection();
+        self.toasts.show("Highlighted");
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -1001,6 +1051,14 @@ impl PagethingApp {
         response: &Response,
         postit_rects: &[egui::Rect],
     ) {
+        // I-beam when the pointer is over selectable page text.
+        if response.hovered()
+            && let Some(pos) = response.interact_pointer_pos()
+            && !postit_rects.iter().any(|rect| rect.contains(pos))
+            && self.loc_at(canvas_rect, pos).is_some()
+        {
+            response.ctx.set_cursor_icon(egui::CursorIcon::Text);
+        }
         if response.drag_started_by(PointerButton::Primary) {
             let pointer = response.interact_pointer_pos();
             if pointer.is_some_and(|pos| postit_rects.iter().any(|rect| rect.contains(pos))) {
@@ -1084,13 +1142,17 @@ impl PagethingApp {
             }
             Outcome::PostitSaved { page, index, text } => {
                 self.dialog = None;
-                let note = Postit { page, text };
                 if let Some(index) = index {
                     if let Some(existing) = self.postits.get_mut(index) {
-                        *existing = note;
+                        existing.page = page;
+                        existing.text = text;
                     }
                 } else {
-                    self.postits.push(note);
+                    self.postits.push(Postit {
+                        page,
+                        text,
+                        highlight: None,
+                    });
                 }
                 self.save_postits();
                 self.toasts.show("Note saved");
@@ -1098,7 +1160,13 @@ impl PagethingApp {
             Outcome::PostitDeleted(index) => {
                 self.dialog = None;
                 if index < self.postits.len() {
-                    self.postits.remove(index);
+                    let note = self.postits.remove(index);
+                    if let Some((start, end)) = note.highlight {
+                        let page = note.page;
+                        self.highlights
+                            .retain(|h| !(h.page == page && h.start == start && h.end == end));
+                        self.save_highlights();
+                    }
                     self.save_postits();
                     self.toasts.show("Note deleted");
                 }
@@ -1184,6 +1252,14 @@ impl PagethingApp {
         };
         self.bookmark_store.set(book, self.bookmarks.clone());
         self.bookmark_store.save();
+    }
+
+    fn save_highlights(&mut self) {
+        let Some(book) = self.current_book.as_deref() else {
+            return;
+        };
+        self.highlight_store.set(book, self.highlights.clone());
+        self.highlight_store.save();
     }
 
     fn toggle_bookmark(&mut self, page: usize) -> bool {
@@ -1341,6 +1417,14 @@ impl PagethingApp {
                                 .map(|(ii, a, b)| (ii, a, b, page_view::SELECTION_HL)),
                         );
                     }
+                    for hl in self.highlights.iter().filter(|h| h.page == i + 1) {
+                        let color = page_view::user_hl(settings.page_mode);
+                        highlights.extend(
+                            selection::piece_ranges(page, hl.start, hl.end)
+                                .into_iter()
+                                .map(|(ii, a, b)| (ii, a, b, color)),
+                        );
+                    }
                     let pv = PageView {
                         page,
                         laid: &book.laid,
@@ -1397,6 +1481,17 @@ impl PagethingApp {
                     let page_rect =
                         grid::page_rect(page_index, self.columns, settings.page_gap, page_size);
                     let zoom = self.view.zoom.max(0.01);
+                    let is_highlight = note.highlight.is_some();
+                    let header_galley = is_highlight.then(|| {
+                        ctx.fonts_mut(|fonts| {
+                            fonts.layout(
+                                "Highlight".to_owned(),
+                                crate::render::fonts::book(11.0 * zoom),
+                                note_text,
+                                144.0 * zoom,
+                            )
+                        })
+                    });
                     let galley = ctx.fonts_mut(|fonts| {
                         fonts.layout(
                             note.text.clone(),
@@ -1405,7 +1500,11 @@ impl PagethingApp {
                             144.0 * zoom,
                         )
                     });
-                    let height = (galley.size().y / zoom + 16.0).clamp(36.0, 240.0);
+                    let header_h = header_galley
+                        .as_ref()
+                        .map(|g| g.size().y / zoom + 4.0)
+                        .unwrap_or(0.0);
+                    let height = (header_h + galley.size().y / zoom + 16.0).clamp(36.0, 240.0);
                     let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 8.0);
                     let world_rect = egui::Rect::from_min_size(
                         egui::pos2(page_rect.max.x + 8.0, *y),
@@ -1427,6 +1526,13 @@ impl PagethingApp {
                     }
                     let clicked = response.clicked();
                     response.on_hover_ui(|ui| {
+                        if is_highlight {
+                            ui.label(
+                                egui::RichText::new("Highlight")
+                                    .strong()
+                                    .font(crate::render::fonts::book(11.0)),
+                            );
+                        }
                         ui.label(
                             egui::RichText::new(note.text.clone())
                                 .font(crate::render::fonts::book(14.0)),
@@ -1434,10 +1540,20 @@ impl PagethingApp {
                     });
                     painter.rect_filled(screen_rect, 4.0, note_fill);
                     painter.rect_stroke(screen_rect, 4.0, note_stroke, egui::StrokeKind::Inside);
+                    let mut text_y = screen_rect.min.y + 8.0 * zoom;
+                    if let Some(header) = &header_galley {
+                        let header_color = note_text.gamma_multiply(0.7);
+                        painter.galley(
+                            screen_rect.min + egui::vec2(8.0 * zoom, text_y - screen_rect.min.y),
+                            header.clone(),
+                            header_color,
+                        );
+                        text_y += header.size().y + 4.0 * zoom;
+                    }
                     painter
                         .with_clip_rect(screen_rect.shrink(8.0 * zoom))
                         .galley(
-                            screen_rect.min + egui::vec2(8.0 * zoom, 8.0 * zoom),
+                            screen_rect.min + egui::vec2(8.0 * zoom, text_y - screen_rect.min.y),
                             galley,
                             note_text,
                         );

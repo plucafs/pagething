@@ -510,6 +510,7 @@ pub fn dialog_ui(
                     ("Ctrl+C", "Copy selected text"),
                     ("c", "Copy selected text"),
                     ("f", "Find selected text"),
+                    ("h", "Highlight selection (adds a post-it)"),
                     ("q", "Clear text selection"),
                     ("z / Left / PgUp", "Previous page (wraps)"),
                     ("x / Right / PgDn", "Next page (wraps)"),

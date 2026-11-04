@@ -282,6 +282,27 @@ impl TitleStore {
 pub struct Postit {
     pub page: usize,
     pub text: String,
+    /// Plain-text range of the highlight created together with this note (via `H`).
+    #[serde(default)]
+    pub highlight: Option<(usize, usize)>,
+}
+
+/// A persistent text highlight: char range in the page's `plain_text`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Highlight {
+    /// 1-based page number (same as [`Postit::page`]).
+    pub page: usize,
+    pub start: usize,
+    pub end: usize,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -342,6 +363,7 @@ impl<T: Clone + Serialize + DeserializeOwned> BookStore<T> {
 
 pub type PostitStore = BookStore<Postit>;
 pub type BookmarkStore = BookStore<usize>;
+pub type HighlightStore = BookStore<Highlight>;
 
 #[cfg(test)]
 mod tests {
@@ -523,6 +545,7 @@ mod tests {
         let note = Postit {
             page: 3,
             text: "remember this".to_owned(),
+            highlight: None,
         };
 
         let mut store = PostitStore::load_from(path.clone());
@@ -532,6 +555,44 @@ mod tests {
         let reloaded = PostitStore::load_from(path);
         assert_eq!(reloaded.get(&book), &[note]);
         assert!(reloaded.get(Path::new("/tmp/another-book.epub")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn highlight_store_roundtrips_and_defaults_created_at() {
+        let dir = std::env::temp_dir().join(format!("pagething-hl-{}", std::process::id()));
+        let path = dir.join("highlights.json");
+        let book = PathBuf::from("/tmp/hl-book.epub");
+        let hl = Highlight {
+            page: 2,
+            start: 10,
+            end: 25,
+            created_at: 1_700_000_000,
+        };
+
+        let mut store = HighlightStore::load_from(path.clone());
+        store.set(&book, vec![hl.clone()]);
+        store.save();
+
+        let reloaded = HighlightStore::load_from(path.clone());
+        assert_eq!(reloaded.get(&book), &[hl]);
+
+        // legacy JSON without created_at
+        std::fs::write(
+            &path,
+            r#"{"/tmp/hl-book.epub":[{"page":1,"start":0,"end":5}]}"#,
+        )
+        .unwrap();
+        let legacy = HighlightStore::load_from(path);
+        assert_eq!(
+            legacy.get(&book),
+            &[Highlight {
+                page: 1,
+                start: 0,
+                end: 5,
+                created_at: 0
+            }]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
