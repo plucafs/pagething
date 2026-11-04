@@ -17,8 +17,8 @@ use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
 use crate::features::toast::Toasts;
 use crate::persist::{
-    BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Settings, SettingsStore,
-    ThemePref, TitleStore, ViewState, ViewStore, unix_now,
+    BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Reply, Settings, SettingsStore,
+    ThemePref, TitleStore, ViewState, ViewStore, fmt_ts, unix_now,
 };
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
@@ -617,11 +617,8 @@ impl PagethingApp {
         });
         self.save_highlights();
         if !text.trim().is_empty() {
-            self.postits.push(Postit {
-                page: page_1based,
-                text,
-                highlight: Some((start, end)),
-            });
+            self.postits
+                .push(Postit::new(page_1based, text, Some((start, end))));
             self.save_postits();
         }
         self.clear_selection();
@@ -817,6 +814,10 @@ impl PagethingApp {
                         page,
                         index: None,
                         text: String::new(),
+                        created_at: 0,
+                        updated_at: 0,
+                        replies: Vec::new(),
+                        reply_draft: String::new(),
                     });
                 }
             }
@@ -1146,16 +1147,65 @@ impl PagethingApp {
                     if let Some(existing) = self.postits.get_mut(index) {
                         existing.page = page;
                         existing.text = text;
+                        existing.updated_at = unix_now();
                     }
                 } else {
-                    self.postits.push(Postit {
-                        page,
-                        text,
-                        highlight: None,
-                    });
+                    self.postits.push(Postit::new(page, text, None));
                 }
                 self.save_postits();
                 self.toasts.show("Note saved");
+            }
+            Outcome::PostitReply { index, text } => {
+                let now = unix_now();
+                let replies = if let Some(note) = self.postits.get_mut(index) {
+                    note.replies.push(Reply {
+                        text,
+                        created_at: now,
+                    });
+                    note.updated_at = now;
+                    Some(note.replies.clone())
+                } else {
+                    None
+                };
+                if let Some(replies) = replies {
+                    self.save_postits();
+                    if let Some(Dialog::Postit {
+                        replies: dialog_replies,
+                        reply_draft,
+                        updated_at,
+                        ..
+                    }) = &mut self.dialog
+                    {
+                        *dialog_replies = replies;
+                        *updated_at = now;
+                        reply_draft.clear();
+                    }
+                    self.toasts.show("Reply added");
+                }
+            }
+            Outcome::PostitReplyDeleted { index, reply_index } => {
+                let replies = if let Some(note) = self.postits.get_mut(index) {
+                    if reply_index < note.replies.len() {
+                        note.replies.remove(reply_index);
+                        note.updated_at = unix_now();
+                        Some(note.replies.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(replies) = replies {
+                    self.save_postits();
+                    if let Some(Dialog::Postit {
+                        replies: dialog_replies,
+                        ..
+                    }) = &mut self.dialog
+                    {
+                        *dialog_replies = replies;
+                    }
+                    self.toasts.show("Reply deleted");
+                }
             }
             Outcome::PostitDeleted(index) => {
                 self.dialog = None;
@@ -1306,6 +1356,10 @@ impl PagethingApp {
                 page,
                 index: None,
                 text: String::new(),
+                created_at: 0,
+                updated_at: 0,
+                replies: Vec::new(),
+                reply_draft: String::new(),
             });
         }
         if std::mem::take(&mut self.pending_bookmark)
@@ -1482,6 +1536,7 @@ impl PagethingApp {
                         grid::page_rect(page_index, self.columns, settings.page_gap, page_size);
                     let zoom = self.view.zoom.max(0.01);
                     let is_highlight = note.highlight.is_some();
+                    let has_meta = note.created_at > 0 || !note.replies.is_empty();
                     let header_galley = is_highlight.then(|| {
                         ctx.fonts_mut(|fonts| {
                             fonts.layout(
@@ -1500,11 +1555,58 @@ impl PagethingApp {
                             144.0 * zoom,
                         )
                     });
+                    let meta_text = if has_meta {
+                        let mut s = String::new();
+                        if note.updated_at > 0 {
+                            s.push_str(&fmt_ts(note.updated_at));
+                        }
+                        if !note.replies.is_empty() {
+                            if !s.is_empty() {
+                                s.push_str(" · ");
+                            }
+                            s.push_str(&format!("{} replies", note.replies.len()));
+                        }
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    let meta_galley = meta_text.as_ref().map(|t| {
+                        ctx.fonts_mut(|fonts| {
+                            fonts.layout(
+                                t.clone(),
+                                crate::render::fonts::book(10.0 * zoom),
+                                note_text.gamma_multiply(0.65),
+                                144.0 * zoom,
+                            )
+                        })
+                    });
+                    let reply_galleys: Vec<_> = note
+                        .replies
+                        .iter()
+                        .map(|r| {
+                            let line = format!("→ {}", r.text);
+                            ctx.fonts_mut(|fonts| {
+                                fonts.layout(
+                                    line,
+                                    crate::render::fonts::book(12.0 * zoom),
+                                    note_text.gamma_multiply(0.85),
+                                    144.0 * zoom,
+                                )
+                            })
+                        })
+                        .collect();
                     let header_h = header_galley
                         .as_ref()
                         .map(|g| g.size().y / zoom + 4.0)
                         .unwrap_or(0.0);
-                    let height = (header_h + galley.size().y / zoom + 16.0).clamp(36.0, 240.0);
+                    let meta_h = meta_galley
+                        .as_ref()
+                        .map(|g| g.size().y / zoom + 4.0)
+                        .unwrap_or(0.0);
+                    let replies_h: f32 =
+                        reply_galleys.iter().map(|g| g.size().y / zoom + 3.0).sum();
+                    let height = (header_h + galley.size().y / zoom + meta_h + replies_h + 16.0)
+                        .clamp(36.0, 320.0);
                     let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 8.0);
                     let world_rect = egui::Rect::from_min_size(
                         egui::pos2(page_rect.max.x + 8.0, *y),
@@ -1537,32 +1639,65 @@ impl PagethingApp {
                             egui::RichText::new(note.text.clone())
                                 .font(crate::render::fonts::book(14.0)),
                         );
+                        for reply in &note.replies {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(fmt_ts(reply.created_at)).weak().small(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(reply.text.clone())
+                                        .font(crate::render::fonts::book(13.0)),
+                                );
+                            });
+                        }
                     });
                     painter.rect_filled(screen_rect, 4.0, note_fill);
                     painter.rect_stroke(screen_rect, 4.0, note_stroke, egui::StrokeKind::Inside);
-                    let mut text_y = screen_rect.min.y + 8.0 * zoom;
+                    let clipped = painter.with_clip_rect(screen_rect.shrink(8.0 * zoom));
+                    let mut text_y = 8.0 * zoom;
+                    let paint_galley =
+                        |p: &egui::Painter, g: Arc<egui::text::Galley>, y: f32, color: Color32| {
+                            p.galley(screen_rect.min + egui::vec2(8.0 * zoom, y), g, color);
+                        };
                     if let Some(header) = &header_galley {
-                        let header_color = note_text.gamma_multiply(0.7);
-                        painter.galley(
-                            screen_rect.min + egui::vec2(8.0 * zoom, text_y - screen_rect.min.y),
+                        paint_galley(
+                            &clipped,
                             header.clone(),
-                            header_color,
+                            text_y,
+                            note_text.gamma_multiply(0.7),
                         );
                         text_y += header.size().y + 4.0 * zoom;
                     }
-                    painter
-                        .with_clip_rect(screen_rect.shrink(8.0 * zoom))
-                        .galley(
-                            screen_rect.min + egui::vec2(8.0 * zoom, text_y - screen_rect.min.y),
-                            galley,
-                            note_text,
+                    paint_galley(&clipped, galley.clone(), text_y, note_text);
+                    text_y += galley.size().y + 4.0 * zoom;
+                    if let Some(meta) = &meta_galley {
+                        paint_galley(
+                            &clipped,
+                            meta.clone(),
+                            text_y,
+                            note_text.gamma_multiply(0.65),
                         );
+                        text_y += meta.size().y + 2.0 * zoom;
+                    }
+                    for reply in &reply_galleys {
+                        paint_galley(
+                            &clipped,
+                            reply.clone(),
+                            text_y,
+                            note_text.gamma_multiply(0.85),
+                        );
+                        text_y += reply.size().y + 3.0 * zoom;
+                    }
                     postit_rects.push(screen_rect);
                     if clicked {
                         self.dialog = Some(Dialog::Postit {
                             page: note.page,
                             index: Some(index),
                             text: note.text.clone(),
+                            created_at: note.created_at,
+                            updated_at: note.updated_at,
+                            replies: note.replies.clone(),
+                            reply_draft: String::new(),
                         });
                     }
                 }

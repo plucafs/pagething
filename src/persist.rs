@@ -279,12 +279,39 @@ impl TitleStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    pub text: String,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Postit {
     pub page: usize,
     pub text: String,
     /// Plain-text range of the highlight created together with this note (via `H`).
     #[serde(default)]
     pub highlight: Option<(usize, usize)>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub replies: Vec<Reply>,
+}
+
+impl Postit {
+    pub fn new(page: usize, text: String, highlight: Option<(usize, usize)>) -> Self {
+        let now = unix_now();
+        Self {
+            page,
+            text,
+            highlight,
+            created_at: now,
+            updated_at: now,
+            replies: Vec::new(),
+        }
+    }
 }
 
 /// A persistent text highlight: char range in the page's `plain_text`.
@@ -303,6 +330,33 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Format a unix timestamp as `d Mon HH:MM` (UTC).
+pub fn fmt_ts(secs: u64) -> String {
+    if secs == 0 {
+        return "—".to_owned();
+    }
+    let days = secs / 86_400;
+    let secs_of_day = secs % 86_400;
+    let (hour, minute) = (secs_of_day / 3_600, (secs_of_day % 3_600) / 60);
+    // Civil-from-days (Howard Hinnant)
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y0 = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y0 + 1 } else { y0 };
+    let _ = year;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mon = MONTHS[(month - 1) as usize];
+    format!("{day} {mon} {hour:02}:{minute:02}")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -542,11 +596,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pagething-notes-{}", std::process::id()));
         let path = dir.join("postits.json");
         let book = PathBuf::from("/tmp/notes-book.epub");
-        let note = Postit {
-            page: 3,
-            text: "remember this".to_owned(),
-            highlight: None,
-        };
+        let note = Postit::new(3, "remember this".to_owned(), None);
 
         let mut store = PostitStore::load_from(path.clone());
         store.set(&book, vec![note.clone()]);
@@ -594,5 +644,23 @@ mod tests {
             }]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn postit_legacy_json_loads_with_default_meta() {
+        let json = r#"{"page":3,"text":"old note","highlight":null}"#;
+        let note: Postit = serde_json::from_str(json).unwrap();
+        assert_eq!(note.page, 3);
+        assert_eq!(note.text, "old note");
+        assert_eq!(note.created_at, 0);
+        assert_eq!(note.updated_at, 0);
+        assert!(note.replies.is_empty());
+    }
+
+    #[test]
+    fn fmt_ts_formats_known_timestamp() {
+        // 2023-11-14 22:13:20 UTC
+        assert_eq!(fmt_ts(1_700_000_000), "14 Nov 22:13");
+        assert_eq!(fmt_ts(0), "—");
     }
 }

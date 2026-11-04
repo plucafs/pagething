@@ -6,7 +6,7 @@ use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
     MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP,
-    MIN_UI_SCALE, PageMode, PageRatio, Settings, ThemePref, TitleStore,
+    MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref, TitleStore, fmt_ts,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -29,6 +29,10 @@ pub enum Dialog {
         page: usize,
         index: Option<usize>,
         text: String,
+        created_at: u64,
+        updated_at: u64,
+        replies: Vec<Reply>,
+        reply_draft: String,
     },
     Bookmarks,
     Recents {
@@ -55,6 +59,14 @@ pub enum Outcome {
         text: String,
     },
     PostitDeleted(usize),
+    PostitReply {
+        index: usize,
+        text: String,
+    },
+    PostitReplyDeleted {
+        index: usize,
+        reply_index: usize,
+    },
     BookmarkOpen(usize),
     BookmarkDeleted(usize),
     OpenRecent {
@@ -300,16 +312,39 @@ pub fn dialog_ui(
                         });
                 }
             }
-            Dialog::Postit { page, index, text } => {
+            Dialog::Postit {
+                page,
+                index,
+                text,
+                created_at,
+                updated_at,
+                replies,
+                reply_draft,
+            } => {
                 ui.label(format!("Page {page}"));
-                ui.add(
+                if *created_at > 0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Created {} · Updated {}",
+                            fmt_ts(*created_at),
+                            fmt_ts(*updated_at)
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
+                let body = ui.add(
                     egui::TextEdit::multiline(text)
                         .font(crate::render::fonts::book(16.0))
                         .desired_width(320.0)
                         .desired_rows(6)
                         .hint_text("Write a note…"),
-                )
-                .request_focus();
+                );
+                // Focus the body only when the dialog opens (nothing focused yet),
+                // so clicking the reply field isn't stolen every frame.
+                if ui.ctx().memory(|m| m.focused()).is_none() {
+                    body.request_focus();
+                }
 
                 if ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.ctrl) {
                     outcome = save_postit(*page, *index, text);
@@ -327,6 +362,102 @@ pub fn dialog_ui(
                         outcome = Outcome::Close;
                     }
                 });
+
+                if !replies.is_empty() || index.is_some() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Replies").strong().small());
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for (reply_index, reply) in replies.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if let Some(index) = index
+                                        && ui
+                                            .small_button("x")
+                                            .on_hover_text("Delete reply")
+                                            .clicked()
+                                    {
+                                        outcome = Outcome::PostitReplyDeleted {
+                                            index: *index,
+                                            reply_index,
+                                        };
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(fmt_ts(reply.created_at))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    let copy_w = 48.0;
+                                    let text_w =
+                                        (ui.available_width() - copy_w - 8.0).max(48.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(text_w, ui.spacing().interact_size.y),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(reply.text.clone())
+                                                        .font(
+                                                            crate::render::fonts::book(14.0),
+                                                        ),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        },
+                                    );
+                                    if ui
+                                        .add_sized(
+                                            [copy_w, ui.spacing().interact_size.y],
+                                            egui::Button::new("Copy"),
+                                        )
+                                        .clicked()
+                                    {
+                                        ctx.copy_text(reply.text.clone());
+                                    }
+                                });
+                            }
+                        });
+                    if let Some(index) = index {
+                        let reply_resp = ui.add(
+                            egui::TextEdit::multiline(reply_draft)
+                                .font(crate::render::fonts::book(14.0))
+                                .desired_width(320.0)
+                                .desired_rows(2)
+                                .hint_text("Reply… (Enter to send, Shift+Enter for newline)")
+                                .return_key(egui::KeyboardShortcut::new(
+                                    egui::Modifiers::SHIFT,
+                                    Key::Enter,
+                                )),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Reply").clicked()
+                                && !reply_draft.trim().is_empty()
+                            {
+                                outcome = Outcome::PostitReply {
+                                    index: *index,
+                                    text: reply_draft.trim().to_owned(),
+                                };
+                            }
+                            ui.label(
+                                egui::RichText::new("Enter sends · Shift+Enter new line")
+                                    .weak()
+                                    .small(),
+                            );
+                        });
+                        // Enter (without Shift) sends while the reply box has focus.
+                        if reply_resp.has_focus()
+                            && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift)
+                            && !reply_draft.trim().is_empty()
+                        {
+                            outcome = Outcome::PostitReply {
+                                index: *index,
+                                text: reply_draft.trim().to_owned(),
+                            };
+                        }
+                    }
+                }
+
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
                     outcome = Outcome::Close;
                 }
