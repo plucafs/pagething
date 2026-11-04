@@ -298,6 +298,9 @@ pub struct Postit {
     pub updated_at: u64,
     #[serde(default)]
     pub replies: Vec<Reply>,
+    /// Collapsed to a small square on the canvas (default: expanded).
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 impl Postit {
@@ -310,6 +313,7 @@ impl Postit {
             created_at: now,
             updated_at: now,
             replies: Vec::new(),
+            collapsed: false,
         }
     }
 }
@@ -655,6 +659,7 @@ mod tests {
         assert_eq!(note.created_at, 0);
         assert_eq!(note.updated_at, 0);
         assert!(note.replies.is_empty());
+        assert!(!note.collapsed, "legacy notes default to expanded");
     }
 
     #[test]

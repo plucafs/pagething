@@ -1518,13 +1518,14 @@ impl PagethingApp {
                         ));
                     }
                 }
-
                 let style = ctx.style_of(ctx.theme());
                 let visuals = &style.visuals;
                 let note_fill = visuals.window_fill;
                 let note_text = visuals.text_color();
                 let note_stroke = visuals.window_stroke();
+                let header_fill = visuals.extreme_bg_color;
                 let mut stack_y: HashMap<usize, f32> = HashMap::new();
+                let mut collapse_toggle: Option<(usize, bool)> = None;
                 for (index, note) in self.postits.iter().enumerate() {
                     let Some(page_index) = note.page.checked_sub(1) else {
                         continue;
@@ -1535,82 +1536,96 @@ impl PagethingApp {
                     let page_rect =
                         grid::page_rect(page_index, self.columns, settings.page_gap, page_size);
                     let zoom = self.view.zoom.max(0.01);
+                    let collapsed = note.collapsed;
                     let is_highlight = note.highlight.is_some();
                     let has_meta = note.created_at > 0 || !note.replies.is_empty();
-                    let header_galley = is_highlight.then(|| {
-                        ctx.fonts_mut(|fonts| {
-                            fonts.layout(
-                                "Highlight".to_owned(),
-                                crate::render::fonts::book(11.0 * zoom),
-                                note_text,
-                                144.0 * zoom,
-                            )
-                        })
-                    });
-                    let galley = ctx.fonts_mut(|fonts| {
-                        fonts.layout(
-                            note.text.clone(),
-                            crate::render::fonts::book(14.0 * zoom),
-                            note_text,
-                            144.0 * zoom,
-                        )
-                    });
-                    let meta_text = if has_meta {
-                        let mut s = String::new();
-                        if note.updated_at > 0 {
-                            s.push_str(&fmt_ts(note.updated_at));
-                        }
-                        if !note.replies.is_empty() {
-                            if !s.is_empty() {
-                                s.push_str(" · ");
-                            }
-                            s.push_str(&format!("{} replies", note.replies.len()));
-                        }
-                        Some(s)
+                    let header_row_h = 18.0; // world px
+
+                    let (header_galley, galley, meta_galley, reply_galleys, height) = if collapsed {
+                        (None, None, None, Vec::new(), 28.0)
                     } else {
-                        None
-                    };
-                    let meta_galley = meta_text.as_ref().map(|t| {
-                        ctx.fonts_mut(|fonts| {
-                            fonts.layout(
-                                t.clone(),
-                                crate::render::fonts::book(10.0 * zoom),
-                                note_text.gamma_multiply(0.65),
-                                144.0 * zoom,
-                            )
-                        })
-                    });
-                    let reply_galleys: Vec<_> = note
-                        .replies
-                        .iter()
-                        .map(|r| {
-                            let line = format!("→ {}", r.text);
+                        let header = is_highlight.then(|| {
                             ctx.fonts_mut(|fonts| {
                                 fonts.layout(
-                                    line,
-                                    crate::render::fonts::book(12.0 * zoom),
-                                    note_text.gamma_multiply(0.85),
+                                    "Highlight".to_owned(),
+                                    crate::render::fonts::book(11.0 * zoom),
+                                    note_text,
                                     144.0 * zoom,
                                 )
                             })
-                        })
-                        .collect();
-                    let header_h = header_galley
-                        .as_ref()
-                        .map(|g| g.size().y / zoom + 4.0)
-                        .unwrap_or(0.0);
-                    let meta_h = meta_galley
-                        .as_ref()
-                        .map(|g| g.size().y / zoom + 4.0)
-                        .unwrap_or(0.0);
-                    let replies_h: f32 =
-                        reply_galleys.iter().map(|g| g.size().y / zoom + 3.0).sum();
-                    let height = (header_h + galley.size().y / zoom + meta_h + replies_h + 16.0)
-                        .clamp(36.0, 320.0);
+                        });
+                        let body = ctx.fonts_mut(|fonts| {
+                            fonts.layout(
+                                note.text.clone(),
+                                crate::render::fonts::book(14.0 * zoom),
+                                note_text,
+                                144.0 * zoom,
+                            )
+                        });
+                        let meta_text = if has_meta {
+                            let mut s = String::new();
+                            if note.updated_at > 0 {
+                                s.push_str(&fmt_ts(note.updated_at));
+                            }
+                            if !note.replies.is_empty() {
+                                if !s.is_empty() {
+                                    s.push_str(" · ");
+                                }
+                                s.push_str(&format!("{} replies", note.replies.len()));
+                            }
+                            Some(s)
+                        } else {
+                            None
+                        };
+                        let meta = meta_text.as_ref().map(|t| {
+                            ctx.fonts_mut(|fonts| {
+                                fonts.layout(
+                                    t.clone(),
+                                    crate::render::fonts::book(10.0 * zoom),
+                                    note_text.gamma_multiply(0.65),
+                                    144.0 * zoom,
+                                )
+                            })
+                        });
+                        let replies: Vec<_> = note
+                            .replies
+                            .iter()
+                            .map(|r| {
+                                let line = format!("→ {}", r.text);
+                                ctx.fonts_mut(|fonts| {
+                                    fonts.layout(
+                                        line,
+                                        crate::render::fonts::book(12.0 * zoom),
+                                        note_text.gamma_multiply(0.85),
+                                        144.0 * zoom,
+                                    )
+                                })
+                            })
+                            .collect();
+                        let header_h = header
+                            .as_ref()
+                            .map(|g| g.size().y / zoom + 4.0)
+                            .unwrap_or(0.0);
+                        let meta_h = meta
+                            .as_ref()
+                            .map(|g| g.size().y / zoom + 4.0)
+                            .unwrap_or(0.0);
+                        let replies_h: f32 = replies.iter().map(|g| g.size().y / zoom + 3.0).sum();
+                        let h = (header_row_h
+                            + header_h
+                            + body.size().y / zoom
+                            + meta_h
+                            + replies_h
+                            + 16.0)
+                            .clamp(48.0, 336.0);
+                        (header, Some(body), meta, replies, h)
+                    };
+
+                    let width = if collapsed { 28.0 } else { 160.0 };
                     let y = stack_y.entry(note.page).or_insert(page_rect.min.y + 8.0);
                     let world_rect = egui::Rect::from_min_size(
                         egui::pos2(page_rect.max.x + 8.0, *y),
-                        egui::vec2(160.0, height),
+                        egui::vec2(width, height),
                     );
                     *y += height + 8.0;
                     let screen_rect = self.view.to_screen_rect(world_rect);
@@ -1618,46 +1633,164 @@ impl PagethingApp {
                         continue;
                     }
                     let clipped_rect = screen_rect.intersect(canvas_rect);
-                    let response = ui.interact(
-                        clipped_rect,
-                        ui.id().with(("postit", index)),
-                        egui::Sense::click(),
-                    );
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    let clicked = response.clicked();
-                    response.on_hover_ui(|ui| {
-                        if is_highlight {
-                            ui.label(
-                                egui::RichText::new("Highlight")
-                                    .strong()
-                                    .font(crate::render::fonts::book(11.0)),
-                            );
-                        }
-                        ui.label(
-                            egui::RichText::new(note.text.clone())
-                                .font(crate::render::fonts::book(14.0)),
-                        );
-                        for reply in &note.replies {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    egui::RichText::new(fmt_ts(reply.created_at)).weak().small(),
-                                );
-                                ui.label(
-                                    egui::RichText::new(reply.text.clone())
-                                        .font(crate::render::fonts::book(13.0)),
-                                );
-                            });
-                        }
-                    });
+
                     painter.rect_filled(screen_rect, 4.0, note_fill);
                     painter.rect_stroke(screen_rect, 4.0, note_stroke, egui::StrokeKind::Inside);
-                    let clipped = painter.with_clip_rect(screen_rect.shrink(8.0 * zoom));
-                    let mut text_y = 8.0 * zoom;
+
+                    if collapsed {
+                        // Small box with "+" — click anywhere expands.
+                        let response = ui.interact(
+                            clipped_rect,
+                            ui.id().with(("postit", index)),
+                            egui::Sense::click(),
+                        );
+                        let clicked = response.clicked();
+                        if response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            response.on_hover_ui(|ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        note.text.chars().take(120).collect::<String>(),
+                                    )
+                                    .font(crate::render::fonts::book(13.0)),
+                                );
+                                ui.label(egui::RichText::new("Click to expand").weak().small());
+                            });
+                        }
+                        // Inner small box for the +
+                        let box_size = 16.0 * zoom;
+                        let box_rect = egui::Rect::from_center_size(
+                            screen_rect.center(),
+                            egui::vec2(box_size, box_size),
+                        );
+                        painter.rect_filled(box_rect, 2.0, header_fill);
+                        painter.rect_stroke(box_rect, 2.0, note_stroke, egui::StrokeKind::Inside);
+                        painter.text(
+                            box_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "+",
+                            egui::FontId::proportional(13.0 * zoom),
+                            note_text,
+                        );
+                        if clicked {
+                            collapse_toggle = Some((index, false));
+                        }
+                        postit_rects.push(screen_rect);
+                        continue;
+                    }
+
+                    // Expanded: header row with "−" (click header → collapse),
+                    // body below (click body → open editor).
+                    let header_screen = egui::Rect::from_min_max(
+                        screen_rect.min,
+                        egui::pos2(screen_rect.max.x, screen_rect.min.y + header_row_h * zoom),
+                    );
+                    let header_clip = header_screen.intersect(canvas_rect);
+                    let header_resp = ui.interact(
+                        header_clip,
+                        ui.id().with(("postit_header", index)),
+                        egui::Sense::click(),
+                    );
+                    let header_clicked = header_resp.clicked();
+                    if header_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        header_resp.on_hover_ui(|ui| {
+                            ui.label(egui::RichText::new("Collapse").weak().small());
+                        });
+                    }
+                    // Header background strip
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            screen_rect.min + egui::vec2(1.0, 1.0),
+                            egui::pos2(screen_rect.max.x - 1.0, header_screen.max.y),
+                        ),
+                        3.0,
+                        header_fill,
+                    );
+                    // "−" on the right of the header
+                    let minus_pos = header_screen.right_center() - egui::vec2(10.0 * zoom, 0.0);
+                    painter.text(
+                        minus_pos,
+                        egui::Align2::CENTER_CENTER,
+                        "−",
+                        egui::FontId::proportional(14.0 * zoom),
+                        note_text,
+                    );
+                    // Optional short label on the left of the header
+                    let header_label = if is_highlight { "Highlight" } else { "Note" };
+                    painter.text(
+                        header_screen.left_center() + egui::vec2(8.0 * zoom, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        header_label,
+                        egui::FontId::proportional(11.0 * zoom),
+                        note_text.gamma_multiply(0.8),
+                    );
+                    if header_clicked {
+                        collapse_toggle = Some((index, true));
+                        postit_rects.push(screen_rect);
+                        continue;
+                    }
+
+                    // Body interact (below header)
+                    let body_screen = egui::Rect::from_min_max(
+                        egui::pos2(screen_rect.min.x, header_screen.max.y),
+                        screen_rect.max,
+                    );
+                    let body_clip = body_screen.intersect(canvas_rect);
+                    let body_resp = ui.interact(
+                        body_clip,
+                        ui.id().with(("postit_body", index)),
+                        egui::Sense::click(),
+                    );
+                    let body_clicked = body_resp.clicked();
+                    if body_resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        body_resp.on_hover_ui(|ui| {
+                            if is_highlight {
+                                ui.label(
+                                    egui::RichText::new("Highlight")
+                                        .strong()
+                                        .font(crate::render::fonts::book(11.0)),
+                                );
+                            }
+                            ui.label(
+                                egui::RichText::new(note.text.clone())
+                                    .font(crate::render::fonts::book(14.0)),
+                            );
+                            for reply in &note.replies {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(fmt_ts(reply.created_at))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(reply.text.clone())
+                                            .font(crate::render::fonts::book(13.0)),
+                                    );
+                                });
+                            }
+                        });
+                    }
+
+                    let clipped = painter.with_clip_rect(egui::Rect::from_min_max(
+                        egui::pos2(
+                            screen_rect.min.x + 8.0 * zoom,
+                            header_screen.max.y + 4.0 * zoom,
+                        ),
+                        screen_rect.max - egui::vec2(8.0 * zoom, 8.0 * zoom),
+                    ));
+                    let mut text_y = 0.0;
                     let paint_galley =
                         |p: &egui::Painter, g: Arc<egui::text::Galley>, y: f32, color: Color32| {
-                            p.galley(screen_rect.min + egui::vec2(8.0 * zoom, y), g, color);
+                            p.galley(
+                                egui::pos2(
+                                    screen_rect.min.x + 8.0 * zoom,
+                                    header_screen.max.y + 4.0 * zoom + y,
+                                ),
+                                g,
+                                color,
+                            );
                         };
                     if let Some(header) = &header_galley {
                         paint_galley(
@@ -1668,8 +1801,10 @@ impl PagethingApp {
                         );
                         text_y += header.size().y + 4.0 * zoom;
                     }
-                    paint_galley(&clipped, galley.clone(), text_y, note_text);
-                    text_y += galley.size().y + 4.0 * zoom;
+                    if let Some(galley) = &galley {
+                        paint_galley(&clipped, galley.clone(), text_y, note_text);
+                        text_y += galley.size().y + 4.0 * zoom;
+                    }
                     if let Some(meta) = &meta_galley {
                         paint_galley(
                             &clipped,
@@ -1688,8 +1823,9 @@ impl PagethingApp {
                         );
                         text_y += reply.size().y + 3.0 * zoom;
                     }
+
                     postit_rects.push(screen_rect);
-                    if clicked {
+                    if body_clicked {
                         self.dialog = Some(Dialog::Postit {
                             page: note.page,
                             index: Some(index),
@@ -1700,6 +1836,12 @@ impl PagethingApp {
                             reply_draft: String::new(),
                         });
                     }
+                }
+                if let Some((index, collapsed)) = collapse_toggle
+                    && let Some(note) = self.postits.get_mut(index)
+                {
+                    note.collapsed = collapsed;
+                    self.save_postits();
                 }
             }
         }
