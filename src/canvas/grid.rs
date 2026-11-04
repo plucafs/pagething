@@ -54,6 +54,28 @@ pub fn adjacent_page_index(current: usize, page_count: usize, forward: bool) -> 
     })
 }
 
+/// Page visually above (`dy < 0`) or below (`dy > 0`) `current` in the column-major grid.
+/// No vertical wrap: returns `None` past the first/last row (or if the cell is past `page_count`).
+pub fn spatial_page_index(
+    current: usize,
+    columns: usize,
+    page_count: usize,
+    dy: i32,
+) -> Option<usize> {
+    if page_count == 0 || current >= page_count {
+        return None;
+    }
+    let columns = columns.max(1);
+    let col = current % columns;
+    let row = current / columns;
+    let new_row = row as i64 + dy as i64;
+    if new_row < 0 {
+        return None;
+    }
+    let target = new_row as usize * columns + col;
+    (target < page_count).then_some(target)
+}
+
 fn page_distance_sq(point: Pos2, rect: Rect) -> f32 {
     let nearest = Pos2::new(
         point.x.clamp(rect.min.x, rect.max.x),
@@ -109,5 +131,32 @@ mod tests {
         assert_eq!(adjacent_page_index(2, 5, false), Some(1));
         assert_eq!(adjacent_page_index(2, 5, true), Some(3));
         assert_eq!(adjacent_page_index(0, 0, true), None);
+    }
+
+    #[test]
+    fn spatial_navigation_moves_by_row_without_wrapping() {
+        // 4 columns, 12 pages → 3 full rows (indices 0..11)
+        // row0: 0 1 2 3 / row1: 4 5 6 7 / row2: 8 9 10 11
+        assert_eq!(
+            spatial_page_index(1, 4, 12, -1),
+            None,
+            "top row, no wrap up"
+        );
+        assert_eq!(spatial_page_index(5, 4, 12, -1), Some(1));
+        assert_eq!(spatial_page_index(5, 4, 12, 1), Some(9));
+        assert_eq!(
+            spatial_page_index(9, 4, 12, 1),
+            None,
+            "bottom row, no wrap down"
+        );
+        assert_eq!(spatial_page_index(0, 4, 12, 1), Some(4));
+        // single column behaves like prev/next (no wrap)
+        assert_eq!(spatial_page_index(3, 1, 10, -1), Some(2));
+        assert_eq!(spatial_page_index(3, 1, 10, 1), Some(4));
+        assert_eq!(spatial_page_index(0, 1, 10, -1), None);
+        // partial last row: col 3 has no page below index 3 on a 5-page, 4-col grid
+        assert_eq!(spatial_page_index(3, 4, 5, 1), None);
+        assert_eq!(spatial_page_index(3, 4, 5, -1), None);
+        assert_eq!(spatial_page_index(0, 4, 0, 1), None);
     }
 }

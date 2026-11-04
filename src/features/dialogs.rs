@@ -645,6 +645,7 @@ pub fn dialog_ui(
                     ("q", "Clear text selection"),
                     ("z / Left / PgUp", "Previous page (wraps)"),
                     ("x / Right / PgDn", "Next page (wraps)"),
+                    ("Up / Down", "Page above / below (by columns)"),
                     ("Home", "First page"),
                     ("End", "Last page"),
                     ("Enter", "Next search result"),

@@ -102,6 +102,8 @@ pub struct PagethingApp {
     dialog: Option<Dialog>,
     pending_jump: Option<usize>,
     pending_navigation: Option<bool>,
+    /// `-1` = row above, `+1` = row below (spatial, respects Columns).
+    pending_vertical: Option<i32>,
     pending_selection_search: Option<String>,
     pending_postit: bool,
     pending_bookmark: bool,
@@ -146,6 +148,7 @@ impl PagethingApp {
             dialog: None,
             pending_jump: None,
             pending_navigation: None,
+            pending_vertical: None,
             pending_selection_search: None,
             pending_postit: false,
             pending_bookmark: false,
@@ -550,10 +553,16 @@ impl PagethingApp {
                         || i.consume_key(Modifiers::NONE, Key::ArrowRight)
                         || i.consume_key(Modifiers::NONE, Key::PageDown)
                 });
+                let up = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp));
+                let down = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown));
                 if backward {
                     self.pending_navigation = Some(false);
                 } else if forward {
                     self.pending_navigation = Some(true);
+                } else if up {
+                    self.pending_vertical = Some(-1);
+                } else if down {
+                    self.pending_vertical = Some(1);
                 }
             }
         }
@@ -988,6 +997,29 @@ impl PagethingApp {
         self.jump_to_page(target + 1, canvas_rect);
     }
 
+    /// Up/Down: move to the page in the row above/below (respects Columns).
+    fn navigate_vertical(&mut self, dy: i32, canvas_rect: egui::Rect) {
+        let Phase::Ready(book) = &self.phase else {
+            return;
+        };
+        let page_count = book.pages.len();
+        let center = self.view.to_world(canvas_rect.center()).to_pos2();
+        let settings = self.settings.settings();
+        let Some(current) = grid::page_index_at_or_near(
+            center,
+            self.columns,
+            settings.page_gap,
+            page_count,
+            grid::page_size(settings.page_ratio),
+        ) else {
+            return;
+        };
+        let Some(target) = grid::spatial_page_index(current, self.columns, page_count, dy) else {
+            return;
+        };
+        self.jump_to_page(target + 1, canvas_rect);
+    }
+
     /// Enter (forward) / Shift+Enter (backward): re-search when the query
     /// changed, otherwise advance the index with wrap-around, then jump.
     fn goto_hit(
@@ -1345,6 +1377,9 @@ impl PagethingApp {
         }
         if let Some(forward) = self.pending_navigation.take() {
             self.navigate_page(forward, canvas_rect);
+        }
+        if let Some(dy) = self.pending_vertical.take() {
+            self.navigate_vertical(dy, canvas_rect);
         }
         if let Some(query) = self.pending_selection_search.take() {
             self.goto_hit(true, &query, canvas_rect, true);
