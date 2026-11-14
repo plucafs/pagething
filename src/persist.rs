@@ -116,6 +116,15 @@ pub enum AppBgMode {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Justify {
+    #[default]
+    Justified,
+    Left,
+    Center,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default = "default_columns")]
@@ -134,6 +143,8 @@ pub struct Settings {
     pub app_bg_mode: AppBgMode,
     #[serde(default = "default_app_bg")]
     pub app_bg: [u8; 3],
+    #[serde(default)]
+    pub justify: Justify,
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
     #[serde(default = "default_font_size")]
@@ -161,6 +172,7 @@ impl Default for Settings {
             page_font: default_page_font(),
             app_bg_mode: AppBgMode::default(),
             app_bg: default_app_bg(),
+            justify: Justify::default(),
             ui_scale: default_ui_scale(),
             font_size: default_font_size(),
             page_gap: default_page_gap(),
@@ -527,6 +539,7 @@ mod tests {
             s.page_font = [78, 90, 123];
             s.app_bg_mode = AppBgMode::Custom;
             s.app_bg = [150, 160, 170];
+            s.justify = Justify::Center;
             s.ui_scale = 1.5;
             s.font_size = 20.0;
             s.page_gap = 80.0;
@@ -544,6 +557,7 @@ mod tests {
         assert_eq!(s.page_font, [78, 90, 123]);
         assert_eq!(s.app_bg_mode, AppBgMode::Custom);
         assert_eq!(s.app_bg, [150, 160, 170]);
+        assert_eq!(s.justify, Justify::Center);
         assert_eq!(s.ui_scale, 1.5);
         assert_eq!(s.font_size, 20.0);
         assert_eq!(s.page_gap, 80.0);
@@ -621,6 +635,7 @@ mod tests {
     fn new_settings_default_for_legacy_files() {
         let settings: Settings = serde_json::from_str(r#"{"columns":6}"#).unwrap();
         assert_eq!(settings.page_ratio, PageRatio::TwoThree);
+        assert_eq!(settings.justify, Justify::Justified);
         assert!(settings.toolbar);
     }
 

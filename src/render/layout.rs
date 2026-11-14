@@ -7,6 +7,7 @@ use eframe::egui::{
 
 use crate::book::blocks::{Block, Span};
 use crate::book::paginate::{self, BlockMetrics};
+use crate::persist::Justify;
 use crate::render::fonts;
 use crate::render::theme::PageColors;
 
@@ -253,6 +254,7 @@ pub fn layout_blocks(
     content_width: f32,
     content_height: f32,
     colors: &PageColors,
+    justify: Justify,
 ) -> Vec<LaidBlock> {
     let mut flat = Vec::new();
     flatten(blocks, 0.0, Some(chapter_starts), &mut flat);
@@ -267,7 +269,11 @@ pub fn layout_blocks(
             FlatKind::Para { spans } => {
                 let mut job = LayoutJob::default();
                 job.wrap.max_width = content_width - fb.indent;
-                job.justify = true;
+                job.justify = justify == Justify::Justified;
+                job.halign = match justify {
+                    Justify::Center => egui::Align::Center,
+                    Justify::Justified | Justify::Left => egui::Align::LEFT,
+                };
                 push_spans(
                     &mut job,
                     &spans,
@@ -543,6 +549,7 @@ mod tests {
                 content_width(&margins, test_page_size()),
                 content_height(&margins, test_page_size()),
                 &colors,
+                Justify::Justified,
             );
             for b in &laid {
                 if let LaidKind::Text { job, .. } = &b.kind {
@@ -581,6 +588,48 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_justification_changes_alignment_without_changing_rows() {
+        let ctx = Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+        let blocks = [Block::Para(vec![Span {
+            text: "word ".repeat(40),
+            ..Default::default()
+        }])];
+        let mut layouts = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            for justify in [Justify::Justified, Justify::Left, Justify::Center] {
+                let laid = layout_blocks(
+                    ui.ctx(),
+                    &blocks,
+                    &[],
+                    &HashMap::new(),
+                    16.0,
+                    180.0,
+                    800.0,
+                    &PageColors::PAPER,
+                    justify,
+                );
+                let LaidKind::Text { job, galley, .. } = &laid[0].kind else {
+                    panic!("expected paragraph text");
+                };
+                layouts.push((job.justify, job.halign, galley.rows.len()));
+            }
+        });
+        output.textures_delta.clear();
+
+        let row_count = layouts[0].2;
+        assert!(row_count > 1);
+        assert_eq!(
+            layouts,
+            [
+                (true, egui::Align::LEFT, row_count),
+                (false, egui::Align::LEFT, row_count),
+                (false, egui::Align::Center, row_count),
+            ]
+        );
+    }
+
+    #[test]
     fn fractional_scale_keeps_requested_line_height_in_pagination() {
         let ctx = Context::default();
         crate::render::fonts::install_for_tests(&ctx);
@@ -603,6 +652,7 @@ mod tests {
                 220.0,
                 800.0,
                 &PageColors::PAPER,
+                Justify::Justified,
             );
             let LaidKind::Text {
                 galley,
@@ -674,6 +724,7 @@ mod tests {
                 width,
                 height,
                 &colors,
+                Justify::Justified,
             );
         });
         output.textures_delta.clear();
@@ -742,6 +793,7 @@ mod tests {
                 width,
                 height,
                 &PageColors::PAPER,
+                Justify::Justified,
             );
             let dark = layout_blocks(
                 ui.ctx(),
@@ -752,6 +804,7 @@ mod tests {
                 width,
                 height,
                 &PageColors::DARK_PAGES,
+                Justify::Justified,
             );
             for block in &paper {
                 if let LaidKind::Text { row_heights, .. } = &block.kind {
@@ -814,6 +867,7 @@ mod tests {
                 content_width(&margins, page_size),
                 content_height(&margins, page_size),
                 &PageColors::PAPER,
+                Justify::Justified,
             );
             for (bi, block) in laid.iter().enumerate() {
                 if let LaidKind::Text { galley, job, .. } = &block.kind {
@@ -855,6 +909,7 @@ mod tests {
                 content_width(&margins, page_size),
                 content_height(&margins, page_size),
                 &colors,
+                Justify::Justified,
             );
             let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
             pages = paginate::paginate(

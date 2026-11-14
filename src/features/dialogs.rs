@@ -5,9 +5,9 @@ use eframe::egui::{self, Align2, CursorIcon, Key, Modifiers, Sense};
 use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
-    AppBgMode, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN,
-    MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref, TitleStore,
-    fmt_ts,
+    AppBgMode, Justify, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE,
+    MIN_MARGIN, MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref,
+    TitleStore, fmt_ts,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -310,6 +310,23 @@ pub fn dialog_ui(
                         (PageRatio::FiveEight, "5:8"),
                     ] {
                         if ui.selectable_value(&mut draft.page_ratio, ratio, label).clicked() {
+                            changed = true;
+                        }
+                    }
+                });
+
+                ui.separator();
+                ui.label("Justification");
+                ui.horizontal(|ui| {
+                    for (justify, label) in [
+                        (Justify::Justified, "Justified"),
+                        (Justify::Left, "Left"),
+                        (Justify::Center, "Center"),
+                    ] {
+                        if ui
+                            .selectable_value(&mut draft.justify, justify, label)
+                            .clicked()
+                        {
                             changed = true;
                         }
                     }

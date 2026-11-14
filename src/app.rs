@@ -279,6 +279,7 @@ impl PagethingApp {
             width,
             height,
             &theme::page_colors(&settings),
+            settings.justify,
         );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
         let mut pages = paginate::paginate(&metrics, height, has_cover);
@@ -440,6 +441,7 @@ impl PagethingApp {
             width,
             height,
             &theme::page_colors(&settings),
+            settings.justify,
         );
         let metrics: Vec<_> = book.laid.iter().map(|b| b.metrics()).collect();
         book.pages = paginate::paginate(&metrics, height, book.cover.is_some());
@@ -1323,6 +1325,7 @@ impl PagethingApp {
                     || theme::page_colors(&changed) != theme::page_colors(&prev)
                     || changed.font_size != prev.font_size
                     || changed.page_ratio != prev.page_ratio
+                    || changed.justify != prev.justify
                 {
                     self.rebuild_ready_book(ctx);
                 }
