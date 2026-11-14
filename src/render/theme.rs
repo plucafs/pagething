@@ -1,6 +1,6 @@
 use eframe::egui::{Color32, Theme};
 
-use crate::persist::PageMode;
+use crate::persist::{AppBgMode, PageMode, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageColors {
@@ -49,17 +49,53 @@ impl PageColors {
             PageMode::Paper => Self::PAPER,
             PageMode::DarkPages => Self::DARK_PAGES,
             PageMode::Sepia => Self::SEPIA,
+            PageMode::Custom => Self::PAPER,
         }
+    }
+
+    pub fn custom(bg: Color32, font: Color32) -> Self {
+        Self {
+            bg,
+            border: mix(bg, font, 0.45),
+            body: font,
+            heading: font,
+            code_bg: mix(bg, font, 0.12),
+            page_number: mix(bg, font, 0.55),
+            rule: mix(bg, font, 0.40),
+        }
+    }
+}
+
+fn mix(a: Color32, b: Color32, amount: f32) -> Color32 {
+    let channel =
+        |a: u8, b: u8| (f32::from(a) * (1.0 - amount) + f32::from(b) * amount).round() as u8;
+    Color32::from_rgb(
+        channel(a.r(), b.r()),
+        channel(a.g(), b.g()),
+        channel(a.b(), b.b()),
+    )
+}
+
+fn rgb(color: [u8; 3]) -> Color32 {
+    Color32::from_rgb(color[0], color[1], color[2])
+}
+
+pub fn page_colors(settings: &Settings) -> PageColors {
+    if settings.page_mode == PageMode::Custom {
+        PageColors::custom(rgb(settings.page_bg), rgb(settings.page_font))
+    } else {
+        PageColors::for_mode(settings.page_mode)
     }
 }
 
 pub const CANVAS_BG_DARK: Color32 = Color32::from_gray(38);
 pub const CANVAS_BG_LIGHT: Color32 = Color32::from_gray(200);
 
-pub fn canvas_bg(theme: Theme) -> Color32 {
-    match theme {
-        Theme::Dark => CANVAS_BG_DARK,
-        Theme::Light => CANVAS_BG_LIGHT,
+pub fn app_bg(settings: &Settings) -> Color32 {
+    match settings.app_bg_mode {
+        AppBgMode::Dark => CANVAS_BG_DARK,
+        AppBgMode::Light => CANVAS_BG_LIGHT,
+        AppBgMode::Custom => rgb(settings.app_bg),
     }
 }
 
@@ -122,8 +158,34 @@ mod tests {
     }
 
     #[test]
-    fn canvas_bg_follows_theme() {
-        assert_eq!(canvas_bg(Theme::Dark), CANVAS_BG_DARK);
-        assert_eq!(canvas_bg(Theme::Light), CANVAS_BG_LIGHT);
+    fn custom_page_colors_use_selected_ink_and_paper() {
+        let bg = Color32::from_rgb(240, 230, 220);
+        let font = Color32::from_rgb(30, 25, 20);
+        let colors = PageColors::custom(bg, font);
+
+        assert_eq!(colors.bg, bg);
+        assert_eq!(colors.body, font);
+        assert_eq!(colors.heading, font);
+        assert!(colors.code_bg.r() < bg.r());
+        assert!(colors.border.r() < bg.r());
+        assert!(colors.page_number.r() < bg.r());
+        assert!(colors.rule.r() < bg.r());
+    }
+
+    #[test]
+    fn settings_resolve_custom_page_and_app_colors() {
+        let settings = Settings {
+            page_mode: PageMode::Custom,
+            page_bg: [230, 220, 210],
+            page_font: [20, 18, 16],
+            app_bg_mode: AppBgMode::Custom,
+            app_bg: [12, 34, 56],
+            ..Settings::default()
+        };
+
+        assert_eq!(page_colors(&settings).bg, Color32::from_rgb(230, 220, 210));
+        assert_eq!(page_colors(&settings).body, Color32::from_rgb(20, 18, 16));
+        assert_eq!(app_bg(&settings), Color32::from_rgb(12, 34, 56));
+        assert_eq!(app_bg(&Settings::default()), CANVAS_BG_DARK);
     }
 }

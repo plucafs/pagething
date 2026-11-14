@@ -22,7 +22,7 @@ use crate::persist::{
 };
 use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
 use crate::render::page_view::{self, PageView};
-use crate::render::theme::{self, PageColors};
+use crate::render::theme;
 
 const MAX_RECENTS: usize = 10;
 
@@ -278,7 +278,7 @@ impl PagethingApp {
             settings.font_size,
             width,
             height,
-            &PageColors::for_mode(settings.page_mode),
+            &theme::page_colors(&settings),
         );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
         let mut pages = paginate::paginate(&metrics, height, has_cover);
@@ -439,7 +439,7 @@ impl PagethingApp {
             settings.font_size,
             width,
             height,
-            &PageColors::for_mode(settings.page_mode),
+            &theme::page_colors(&settings),
         );
         let metrics: Vec<_> = book.laid.iter().map(|b| b.metrics()).collect();
         book.pages = paginate::paginate(&metrics, height, book.cover.is_some());
@@ -487,6 +487,9 @@ impl PagethingApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Q)) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F11)) {
+            Self::toggle_fullscreen(ctx);
         }
         if self.dialog.is_none()
             && !ctx.any_popup_open()
@@ -706,6 +709,14 @@ impl PagethingApp {
                             input: self.columns.to_string(),
                         });
                     }
+                    ui.separator();
+                    if ui
+                        .add(egui::Button::new("Fullscreen").shortcut_text("F11"))
+                        .clicked()
+                    {
+                        ui.close();
+                        Self::toggle_fullscreen(ui.ctx());
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("Shortcuts").clicked() {
@@ -719,6 +730,11 @@ impl PagethingApp {
                 });
             });
         });
+    }
+
+    fn toggle_fullscreen(ctx: &egui::Context) {
+        let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(!fullscreen));
     }
 
     fn title_bar(&mut self, ui: &mut egui::Ui) {
@@ -1304,7 +1320,7 @@ impl PagethingApp {
                     ctx.set_zoom_factor(changed.ui_scale);
                 }
                 if changed.margin != prev.margin
-                    || changed.page_mode != prev.page_mode
+                    || theme::page_colors(&changed) != theme::page_colors(&prev)
                     || changed.font_size != prev.font_size
                     || changed.page_ratio != prev.page_ratio
                 {
@@ -1408,7 +1424,7 @@ impl PagethingApp {
         }
 
         let painter = ui.painter().with_clip_rect(canvas_rect);
-        painter.rect_filled(canvas_rect, 0.0, theme::canvas_bg(ui.ctx().theme()));
+        painter.rect_filled(canvas_rect, 0.0, theme::app_bg(&self.settings.settings()));
         let mut postit_rects = Vec::new();
 
         match &self.phase {
@@ -1479,7 +1495,7 @@ impl PagethingApp {
                 let settings = self.settings.settings();
                 let margins = Margins::uniform(settings.margin);
                 let page_size = grid::page_size(settings.page_ratio);
-                let colors = PageColors::for_mode(settings.page_mode);
+                let colors = theme::page_colors(&settings);
                 for (i, page) in book.pages.iter().enumerate() {
                     let world_rect = grid::page_rect(i, self.columns, settings.page_gap, page_size);
                     let screen_rect = self.view.to_screen_rect(world_rect);
@@ -1511,7 +1527,7 @@ impl PagethingApp {
                         );
                     }
                     for hl in self.highlights.iter().filter(|h| h.page == i + 1) {
-                        let color = page_view::user_hl(settings.page_mode);
+                        let color = page_view::user_hl(settings.page_mode, colors.bg);
                         highlights.extend(
                             selection::piece_ranges(page, hl.start, hl.end)
                                 .into_iter()

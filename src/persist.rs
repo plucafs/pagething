@@ -76,6 +76,18 @@ fn default_page_gap() -> f32 {
     crate::canvas::grid::GAP
 }
 
+fn default_page_bg() -> [u8; 3] {
+    [247, 243, 234]
+}
+
+fn default_page_font() -> [u8; 3] {
+    [43, 38, 33]
+}
+
+fn default_app_bg() -> [u8; 3] {
+    [38, 38, 38]
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemePref {
@@ -92,6 +104,16 @@ pub enum PageMode {
     Paper,
     DarkPages,
     Sepia,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AppBgMode {
+    #[default]
+    Dark,
+    Light,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -104,6 +126,14 @@ pub struct Settings {
     pub theme: ThemePref,
     #[serde(default)]
     pub page_mode: PageMode,
+    #[serde(default = "default_page_bg")]
+    pub page_bg: [u8; 3],
+    #[serde(default = "default_page_font")]
+    pub page_font: [u8; 3],
+    #[serde(default)]
+    pub app_bg_mode: AppBgMode,
+    #[serde(default = "default_app_bg")]
+    pub app_bg: [u8; 3],
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
     #[serde(default = "default_font_size")]
@@ -127,6 +157,10 @@ impl Default for Settings {
             margin: default_margin(),
             theme: ThemePref::default(),
             page_mode: PageMode::default(),
+            page_bg: default_page_bg(),
+            page_font: default_page_font(),
+            app_bg_mode: AppBgMode::default(),
+            app_bg: default_app_bg(),
             ui_scale: default_ui_scale(),
             font_size: default_font_size(),
             page_gap: default_page_gap(),
@@ -489,6 +523,10 @@ mod tests {
             s.margin = 72.0;
             s.theme = ThemePref::Dark;
             s.page_mode = PageMode::DarkPages;
+            s.page_bg = [12, 34, 56];
+            s.page_font = [78, 90, 123];
+            s.app_bg_mode = AppBgMode::Custom;
+            s.app_bg = [150, 160, 170];
             s.ui_scale = 1.5;
             s.font_size = 20.0;
             s.page_gap = 80.0;
@@ -502,6 +540,10 @@ mod tests {
         assert_eq!(s.margin, 72.0);
         assert_eq!(s.theme, ThemePref::Dark);
         assert_eq!(s.page_mode, PageMode::DarkPages);
+        assert_eq!(s.page_bg, [12, 34, 56]);
+        assert_eq!(s.page_font, [78, 90, 123]);
+        assert_eq!(s.app_bg_mode, AppBgMode::Custom);
+        assert_eq!(s.app_bg, [150, 160, 170]);
         assert_eq!(s.ui_scale, 1.5);
         assert_eq!(s.font_size, 20.0);
         assert_eq!(s.page_gap, 80.0);

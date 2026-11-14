@@ -5,8 +5,9 @@ use eframe::egui::{self, Align2, CursorIcon, Key, Modifiers, Sense};
 use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
-    MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP,
-    MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref, TitleStore, fmt_ts,
+    AppBgMode, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN,
+    MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref, TitleStore,
+    fmt_ts,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -241,11 +242,58 @@ pub fn dialog_ui(
                         (PageMode::Paper, "Light"),
                         (PageMode::DarkPages, "Dark"),
                         (PageMode::Sepia, "Sepia"),
+                        (PageMode::Custom, "Custom"),
                     ] {
                         if ui
                             .selectable_value(&mut draft.page_mode, mode, label)
                             .clicked()
                         {
+                            changed = true;
+                        }
+                    }
+                });
+
+                if draft.page_mode == PageMode::Custom {
+                    ui.horizontal(|ui| {
+                        ui.label("Background");
+                        let bg = egui::widgets::color_picker::color_edit_button_srgb(
+                            ui,
+                            &mut draft.page_bg,
+                        );
+                        if bg.drag_stopped() || (bg.changed() && !bg.dragged()) {
+                            changed = true;
+                        }
+                        ui.label("Font");
+                        let font = egui::widgets::color_picker::color_edit_button_srgb(
+                            ui,
+                            &mut draft.page_font,
+                        );
+                        if font.drag_stopped() || (font.changed() && !font.dragged()) {
+                            changed = true;
+                        }
+                    });
+                }
+
+                ui.label("App background");
+                ui.horizontal(|ui| {
+                    for (mode, label) in [
+                        (AppBgMode::Dark, "Dark"),
+                        (AppBgMode::Light, "Light"),
+                        (AppBgMode::Custom, "Custom"),
+                    ] {
+                        if ui
+                            .selectable_value(&mut draft.app_bg_mode, mode, label)
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                    if draft.app_bg_mode == AppBgMode::Custom {
+                        let color = egui::widgets::color_picker::color_edit_button_srgb(
+                            ui,
+                            &mut draft.app_bg,
+                        );
+                        if color.drag_stopped() || (color.changed() && !color.dragged()) {
                             changed = true;
                         }
                     }
@@ -641,6 +689,7 @@ pub fn dialog_ui(
                     ("Ctrl+R", "Recent books"),
                     ("Ctrl+N", "Open a new window"),
                     ("Ctrl+Q", "Quit"),
+                    ("F11", "Toggle fullscreen"),
                     ("Ctrl+G", "Go to page"),
                     ("Ctrl+L", "Set columns"),
                     ("Ctrl+F", "Search the book"),

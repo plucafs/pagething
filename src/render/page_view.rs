@@ -15,10 +15,18 @@ pub const SEARCH_CURRENT_HL: Color32 = Color32::from_rgba_premultiplied(190, 70,
 pub const SELECTION_HL: Color32 = Color32::from_rgba_premultiplied(26, 60, 110, 110);
 
 /// User highlight wash: visible on light pages, muted on dark pages.
-pub fn user_hl(mode: PageMode) -> Color32 {
+pub fn user_hl(mode: PageMode, bg: Color32) -> Color32 {
     match mode {
         PageMode::DarkPages => Color32::from_rgba_premultiplied(130, 118, 70, 110),
         PageMode::Paper | PageMode::Sepia => Color32::from_rgba_premultiplied(255, 230, 90, 110),
+        PageMode::Custom
+            if (u16::from(bg.r()) * 299 + u16::from(bg.g()) * 587 + u16::from(bg.b()) * 114)
+                / 1000
+                > 128 =>
+        {
+            Color32::from_rgba_premultiplied(255, 230, 90, 110)
+        }
+        PageMode::Custom => Color32::from_rgba_premultiplied(130, 118, 70, 110),
     }
 }
 
