@@ -20,7 +20,7 @@ use crate::persist::{
     BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Reply, Settings, SettingsStore,
     ThemePref, TitleStore, ViewState, ViewStore, fmt_ts, unix_now,
 };
-use crate::render::layout::{self, DisplayCache, LaidBlock, Margins};
+use crate::render::layout::{self, DisplayCache, LaidBlock, LaidKind, Margins};
 use crate::render::page_view::{self, PageView};
 use crate::render::theme;
 
@@ -69,8 +69,6 @@ enum ImageDecodeMessage {
 
 #[derive(Clone, Copy)]
 enum ToolbarAction {
-    Copy,
-    Deselect,
     Bookmark,
     Note,
     Search,
@@ -79,6 +77,14 @@ enum ToolbarAction {
     ZoomOut,
     ZoomReset,
     ZoomIn,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionAction {
+    Copy,
+    Highlight,
+    Find,
+    Clear,
 }
 
 pub struct PagethingApp {
@@ -535,16 +541,8 @@ impl PagethingApp {
                 self.highlight_selection();
             } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C)) {
                 self.copy_selection(ctx);
-            } else if has_selection
-                && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F))
-                && let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase)
-                && let Some(page) = book.pages.get(sel.page)
-            {
-                let query = selection::copy_text(page, &book.laid, sel);
-                self.dialog = Some(Dialog::Search {
-                    input: query.clone(),
-                });
-                self.pending_selection_search = Some(query);
+            } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
+                self.search_selection();
             } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
                 self.clear_selection();
             }
@@ -592,6 +590,23 @@ impl PagethingApp {
             ctx.copy_text(text);
             self.toasts.show("Copied");
         }
+    }
+
+    fn search_selection(&mut self) {
+        let query = match (&self.selection, &self.phase) {
+            (Some(sel), Phase::Ready(book)) => book
+                .pages
+                .get(sel.page)
+                .map(|page| selection::copy_text(page, &book.laid, sel)),
+            _ => None,
+        };
+        let Some(query) = query.filter(|query| !query.trim().is_empty()) else {
+            return;
+        };
+        self.dialog = Some(Dialog::Search {
+            input: query.clone(),
+        });
+        self.pending_selection_search = Some(query);
     }
 
     fn clear_selection(&mut self) {
@@ -645,12 +660,17 @@ impl PagethingApp {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open…").clicked() {
+                    if ui
+                        .button("Open…")
+                        .on_hover_text("Open an EPUB file (Ctrl+O)")
+                        .clicked()
+                    {
                         ui.close();
                         self.want_open = true;
                     }
                     if ui
                         .add(egui::Button::new("New Window").shortcut_text("Ctrl+N"))
+                        .on_hover_text("Open another reader window")
                         .clicked()
                     {
                         ui.close();
@@ -664,7 +684,11 @@ impl PagethingApp {
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| path.display().to_string());
-                                if ui.button(label).clicked() {
+                                if ui
+                                    .button(label)
+                                    .on_hover_text(path.display().to_string())
+                                    .clicked()
+                                {
                                     picked = Some(path.clone());
                                     ui.close();
                                 }
@@ -672,11 +696,14 @@ impl PagethingApp {
                             if let Some(path) = picked {
                                 self.open_path(path);
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text("Open a recently used EPUB");
                     });
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Settings…").shortcut_text("Ctrl+,"))
+                        .on_hover_text("Adjust reader and page settings")
                         .clicked()
                     {
                         ui.close();
@@ -687,6 +714,7 @@ impl PagethingApp {
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Quit").shortcut_text("Ctrl+Q"))
+                        .on_hover_text("Close pagething")
                         .clicked()
                     {
                         ui.send_viewport_cmd(ViewportCommand::Close);
@@ -696,6 +724,7 @@ impl PagethingApp {
                     ui.add_enabled_ui(matches!(self.phase, Phase::Ready(_)), |ui| {
                         if ui
                             .add(egui::Button::new("Go to page…").shortcut_text("Ctrl+G"))
+                            .on_hover_text("Jump to a page number")
                             .clicked()
                         {
                             ui.close();
@@ -706,6 +735,7 @@ impl PagethingApp {
                     });
                     if ui
                         .add(egui::Button::new("Columns…").shortcut_text("Ctrl+L"))
+                        .on_hover_text("Set how many pages appear in each row")
                         .clicked()
                     {
                         ui.close();
@@ -716,6 +746,7 @@ impl PagethingApp {
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Fullscreen").shortcut_text("F11"))
+                        .on_hover_text("Toggle fullscreen mode")
                         .clicked()
                     {
                         ui.close();
@@ -723,11 +754,19 @@ impl PagethingApp {
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("Shortcuts").clicked() {
+                    if ui
+                        .button("Shortcuts")
+                        .on_hover_text("Show keyboard and mouse controls")
+                        .clicked()
+                    {
                         ui.close();
                         self.dialog = Some(Dialog::Shortcuts);
                     }
-                    if ui.button("About").clicked() {
+                    if ui
+                        .button("About")
+                        .on_hover_text("About pagething")
+                        .clicked()
+                    {
                         ui.close();
                         self.dialog = Some(Dialog::Help);
                     }
@@ -767,9 +806,6 @@ impl PagethingApp {
             return None;
         }
 
-        let has_selection = self
-            .selection
-            .is_some_and(|selection| !selection.is_empty());
         let mut action = None;
         egui::Panel::top("action_bar").show(ui, |ui| {
             egui::ScrollArea::horizontal()
@@ -779,41 +815,61 @@ impl PagethingApp {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(has_selection, egui::Button::new("Copy"))
+                            .button("Bookmark")
+                            .on_hover_text("Toggle bookmark on the current page (V)")
                             .clicked()
                         {
-                            action = Some(ToolbarAction::Copy);
-                        }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("Deselect"))
-                            .clicked()
-                        {
-                            action = Some(ToolbarAction::Deselect);
-                        }
-                        if ui.button("Bookmark").clicked() {
                             action = Some(ToolbarAction::Bookmark);
                         }
-                        if ui.button("Note").clicked() {
+                        if ui
+                            .button("Note")
+                            .on_hover_text("Add a note to the current page (A)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::Note);
                         }
-                        if ui.button("Search").clicked() {
+                        if ui
+                            .button("Search")
+                            .on_hover_text("Search the book (Ctrl+F)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::Search);
                         }
                         ui.separator();
-                        if ui.button("Prev").clicked() {
+                        if ui
+                            .button("Prev")
+                            .on_hover_text("Previous page (Z, Left, or PgUp)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::Previous);
                         }
-                        if ui.button("Next").clicked() {
+                        if ui
+                            .button("Next")
+                            .on_hover_text("Next page (X, Right, or PgDn)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::Next);
                         }
                         ui.separator();
-                        if ui.button("Zoom Out").clicked() {
+                        if ui
+                            .button("Zoom Out")
+                            .on_hover_text("Zoom out (Ctrl+-)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::ZoomOut);
                         }
-                        if ui.button("Reset").clicked() {
+                        if ui
+                            .button("Reset")
+                            .on_hover_text("Set zoom to 100%; Ctrl+0 resets the view")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::ZoomReset);
                         }
-                        if ui.button("Zoom In").clicked() {
+                        if ui
+                            .button("Zoom In")
+                            .on_hover_text("Zoom in (Ctrl++ or Ctrl+=)")
+                            .clicked()
+                        {
                             action = Some(ToolbarAction::ZoomIn);
                         }
                     });
@@ -823,15 +879,8 @@ impl PagethingApp {
         action
     }
 
-    fn perform_toolbar_action(
-        &mut self,
-        action: ToolbarAction,
-        ctx: &egui::Context,
-        canvas_rect: egui::Rect,
-    ) {
+    fn perform_toolbar_action(&mut self, action: ToolbarAction, canvas_rect: egui::Rect) {
         match action {
-            ToolbarAction::Copy => self.copy_selection(ctx),
-            ToolbarAction::Deselect => self.clear_selection(),
             ToolbarAction::Bookmark => {
                 if let Some(page) = self.current_page(canvas_rect) {
                     self.toggle_bookmark_with_toast(page);
@@ -994,6 +1043,151 @@ impl PagethingApp {
             grid::page_size(settings.page_ratio),
         )
         .map(|index| index + 1)
+    }
+
+    fn page_progress(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
+        if self.dialog.is_some() || !self.settings.settings().toolbar {
+            return;
+        }
+        let page_count = match &self.phase {
+            Phase::Ready(book) => book.pages.len(),
+            _ => return,
+        };
+        let Some(current_page) = self.current_page(canvas_rect) else {
+            return;
+        };
+
+        let style = ctx.style_of(ctx.theme());
+        let mut jump = false;
+        egui::Area::new(egui::Id::new("page_progress"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(canvas_rect.right_top() + egui::vec2(-12.0, 10.0))
+            .pivot(egui::Align2::RIGHT_TOP)
+            .constrain_to(canvas_rect)
+            .show(ctx, |ui| {
+                egui::Frame::popup(&style).show(ui, |ui| {
+                    jump = ui
+                        .button(format!("{current_page} / {page_count}"))
+                        .on_hover_text("Current page. Click to jump to a page (Ctrl+G).")
+                        .clicked();
+                });
+            });
+        if jump {
+            self.dialog = Some(Dialog::Jump {
+                input: current_page.to_string(),
+            });
+        }
+    }
+
+    fn selection_screen_rect(&self) -> Option<egui::Rect> {
+        let selection = self.selection.filter(|selection| !selection.is_empty())?;
+        let Phase::Ready(book) = &self.phase else {
+            return None;
+        };
+        let page = book.pages.get(selection.page)?;
+        let settings = self.settings.settings();
+        let margins = Margins::uniform(settings.margin);
+        let page_size = grid::page_size(settings.page_ratio);
+        let page_rect = grid::page_rect(selection.page, self.columns, settings.page_gap, page_size);
+        let page_origin = self.view.to_screen_rect(page_rect).min;
+        let zoom = self.view.zoom;
+        let mut bounds = None;
+
+        for (item_index, start, end) in selection::selection_spans(page, &selection) {
+            let Some(item) = page.items.get(item_index) else {
+                continue;
+            };
+            let Some(block) = book.laid.get(item.block) else {
+                continue;
+            };
+            let LaidKind::Text { galley, indent, .. } = &block.kind else {
+                continue;
+            };
+            let Some(first_row) = galley.rows.get(item.row_start) else {
+                continue;
+            };
+            let origin =
+                page_origin + egui::vec2(margins.left + *indent, margins.top + item.y) * zoom;
+            for rect in selection::span_rects(galley, item.row_start, item.row_end, start, end) {
+                let min = origin + (rect.min.to_vec2() - first_row.pos.to_vec2()) * zoom;
+                let max = origin + (rect.max.to_vec2() - first_row.pos.to_vec2()) * zoom;
+                let rect = egui::Rect::from_min_max(min, max);
+                bounds = Some(bounds.map_or(rect, |current: egui::Rect| current.union(rect)));
+            }
+        }
+        bounds
+    }
+
+    fn selection_toolbar(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
+        if self.dialog.is_some() || self.selection_drag {
+            return;
+        }
+        let Some(selection_rect) = self.selection_screen_rect() else {
+            return;
+        };
+        if !selection_rect.intersects(canvas_rect) {
+            return;
+        }
+
+        let half_width = 140.0;
+        let x = if canvas_rect.width() > half_width * 2.0 {
+            selection_rect.center().x.clamp(
+                canvas_rect.left() + half_width,
+                canvas_rect.right() - half_width,
+            )
+        } else {
+            canvas_rect.center().x
+        };
+        let position = egui::pos2(x, selection_rect.bottom() + 8.0);
+        let style = ctx.style_of(ctx.theme());
+        let mut action = None;
+        egui::Area::new(egui::Id::new("selection_toolbar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(position)
+            .pivot(egui::Align2::CENTER_TOP)
+            .constrain_to(canvas_rect)
+            .show(ctx, |ui| {
+                egui::Frame::popup(&style).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Copy")
+                            .on_hover_text("Copy selected text (Ctrl+C or C)")
+                            .clicked()
+                        {
+                            action = Some(SelectionAction::Copy);
+                        }
+                        if ui
+                            .button("Highlight")
+                            .on_hover_text("Highlight selection and add a note (H)")
+                            .clicked()
+                        {
+                            action = Some(SelectionAction::Highlight);
+                        }
+                        if ui
+                            .button("Find")
+                            .on_hover_text("Find selected text in the book (F)")
+                            .clicked()
+                        {
+                            action = Some(SelectionAction::Find);
+                        }
+                        if ui
+                            .button("Clear")
+                            .on_hover_text("Clear text selection (Q)")
+                            .clicked()
+                        {
+                            action = Some(SelectionAction::Clear);
+                        }
+                    });
+                });
+            });
+
+        match action {
+            Some(SelectionAction::Copy) => self.copy_selection(ctx),
+            Some(SelectionAction::Highlight) => self.highlight_selection(),
+            Some(SelectionAction::Find) => self.search_selection(),
+            Some(SelectionAction::Clear) => self.clear_selection(),
+            None => {}
+        }
     }
 
     fn navigate_page(&mut self, forward: bool, canvas_rect: egui::Rect) {
@@ -1914,6 +2108,8 @@ impl PagethingApp {
         self.handle_selection_input(canvas_rect, &response, &postit_rects);
 
         let ctx = ui.ctx().clone();
+        self.page_progress(&ctx, canvas_rect);
+        self.selection_toolbar(&ctx, canvas_rect);
         self.apply_dialog(canvas_rect, &ctx);
         if matches!(self.phase, Phase::Loading { .. }) {
             ctx.request_repaint();
@@ -1933,7 +2129,7 @@ impl eframe::App for PagethingApp {
         let toolbar_action = self.toolbar(ui);
         let canvas_rect = ui.available_rect_before_wrap();
         if let Some(action) = toolbar_action {
-            self.perform_toolbar_action(action, &ctx, canvas_rect);
+            self.perform_toolbar_action(action, canvas_rect);
         }
         self.handle_shortcuts(&ctx, canvas_rect);
         self.run_file_dialog();
