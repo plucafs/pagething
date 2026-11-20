@@ -39,10 +39,6 @@ impl View {
         )
     }
 
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     pub fn zoom_at(&mut self, anchor: Pos2, factor: f32) {
         let world_at_anchor = self.to_world(anchor);
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -54,11 +50,6 @@ impl View {
     }
 
     pub fn handle_shortcuts(&mut self, ctx: &Context, canvas_rect: Rect) -> bool {
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Num0)) {
-            self.reset();
-            return true;
-        }
-
         let zoom_in = [
             KeyboardShortcut::new(Modifiers::CTRL, Key::Plus),
             KeyboardShortcut::new(Modifiers::CTRL, Key::Equals),
@@ -110,6 +101,10 @@ impl View {
 
         if pixel_scroll != Vec2::ZERO {
             self.pan += pixel_scroll;
+        }
+
+        if line_scroll.x != 0.0 {
+            self.pan.x += line_scroll.x * 40.0;
         }
 
         if line_scroll.y != 0.0

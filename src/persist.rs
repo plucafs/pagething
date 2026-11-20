@@ -10,6 +10,14 @@ pub struct ViewState {
     pub zoom: f32,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SavedPoint {
+    pub page: usize,
+    pub view: ViewState,
+    #[serde(default)]
+    pub saved_at: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ViewStore {
     #[serde(skip)]
@@ -135,6 +143,34 @@ pub enum Justify {
     Center,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BookFont {
+    #[default]
+    Serif,
+    Sans,
+    Monospace,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LineSpacing {
+    Compact,
+    #[default]
+    Normal,
+    Spacious,
+}
+
+impl LineSpacing {
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::Compact => 1.2,
+            Self::Normal => 1.4,
+            Self::Spacious => 1.7,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default = "default_columns")]
@@ -157,6 +193,10 @@ pub struct Settings {
     pub app_bg: [u8; 3],
     #[serde(default)]
     pub justify: Justify,
+    #[serde(default)]
+    pub book_font: BookFont,
+    #[serde(default)]
+    pub line_spacing: LineSpacing,
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
     #[serde(default = "default_font_size")]
@@ -186,6 +226,8 @@ impl Default for Settings {
             app_bg_mode: AppBgMode::default(),
             app_bg: default_app_bg(),
             justify: Justify::default(),
+            book_font: BookFont::default(),
+            line_spacing: LineSpacing::default(),
             ui_scale: default_ui_scale(),
             font_size: default_font_size(),
             page_gap: default_page_gap(),
@@ -352,6 +394,8 @@ pub struct Postit {
     #[serde(default)]
     pub highlight: Option<(usize, usize)>,
     #[serde(default)]
+    pub anchor: Option<TextAnchor>,
+    #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub updated_at: u64,
@@ -369,6 +413,7 @@ impl Postit {
             page,
             text,
             highlight,
+            anchor: None,
             created_at: now,
             updated_at: now,
             replies: Vec::new(),
@@ -385,7 +430,48 @@ pub struct Highlight {
     pub start: usize,
     pub end: usize,
     #[serde(default)]
+    pub anchor: Option<TextAnchor>,
+    #[serde(default)]
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextAnchor {
+    pub quote: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub after: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Bookmark {
+    pub page: usize,
+    #[serde(default)]
+    pub anchor: Option<TextAnchor>,
+}
+
+impl<'de> Deserialize<'de> for Bookmark {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredBookmark {
+            Page(usize),
+            Anchored {
+                page: usize,
+                #[serde(default)]
+                anchor: Option<TextAnchor>,
+            },
+        }
+
+        Ok(match StoredBookmark::deserialize(deserializer)? {
+            StoredBookmark::Page(page) => Self { page, anchor: None },
+            StoredBookmark::Anchored { page, anchor } => Self { page, anchor },
+        })
+    }
 }
 
 pub fn unix_now() -> u64 {
@@ -479,8 +565,9 @@ impl<T: Clone + Serialize + DeserializeOwned> BookStore<T> {
 }
 
 pub type PostitStore = BookStore<Postit>;
-pub type BookmarkStore = BookStore<usize>;
+pub type BookmarkStore = BookStore<Bookmark>;
 pub type HighlightStore = BookStore<Highlight>;
+pub type SavedPointStore = BookStore<SavedPoint>;
 
 #[cfg(test)]
 mod tests {
@@ -504,6 +591,30 @@ mod tests {
         let reloaded = ViewStore::load_from(path.clone());
         assert_eq!(reloaded.get(&book), Some(state));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saved_points_roundtrip_by_book() {
+        let dir = std::env::temp_dir().join(format!("pagething-points-{}", std::process::id()));
+        let path = dir.join("saved_points.json");
+        let book = PathBuf::from("/tmp/points-book.epub");
+        let point = SavedPoint {
+            page: 12,
+            view: ViewState {
+                pan_x: 135.0,
+                pan_y: -24.0,
+                zoom: 1.75,
+            },
+            saved_at: 1_700_000_000,
+        };
+        let mut store = SavedPointStore::load_from(path.clone());
+        store.set(&book, vec![point]);
+        store.save();
+
+        let reloaded = SavedPointStore::load_from(path);
+        assert_eq!(reloaded.get(&book), &[point]);
+        assert!(reloaded.get(Path::new("/tmp/another-book.epub")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -558,6 +669,8 @@ mod tests {
             s.font_size = 20.0;
             s.page_gap = 80.0;
             s.page_ratio = PageRatio::FiveEight;
+            s.book_font = BookFont::Sans;
+            s.line_spacing = LineSpacing::Spacious;
             s.toolbar = false;
         });
 
@@ -577,6 +690,8 @@ mod tests {
         assert_eq!(s.font_size, 20.0);
         assert_eq!(s.page_gap, 80.0);
         assert_eq!(s.page_ratio, PageRatio::FiveEight);
+        assert_eq!(s.book_font, BookFont::Sans);
+        assert_eq!(s.line_spacing, LineSpacing::Spacious);
         assert!(!s.toolbar);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -708,6 +823,7 @@ mod tests {
             page: 2,
             start: 10,
             end: 25,
+            anchor: None,
             created_at: 1_700_000_000,
         };
 
@@ -731,6 +847,7 @@ mod tests {
                 page: 1,
                 start: 0,
                 end: 5,
+                anchor: None,
                 created_at: 0
             }]
         );
@@ -747,6 +864,23 @@ mod tests {
         assert_eq!(note.updated_at, 0);
         assert!(note.replies.is_empty());
         assert!(!note.collapsed, "legacy notes default to expanded");
+    }
+
+    #[test]
+    fn bookmark_store_reads_legacy_page_numbers_and_anchored_bookmarks() {
+        let stored: Vec<Bookmark> = serde_json::from_str(
+            r#"[3,{"page":7,"anchor":{"quote":"chapter","before":"","after":" one"}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            stored[0],
+            Bookmark {
+                page: 3,
+                anchor: None
+            }
+        );
+        assert_eq!(stored[1].page, 7);
+        assert_eq!(stored[1].anchor.as_ref().unwrap().quote, "chapter");
     }
 
     #[test]

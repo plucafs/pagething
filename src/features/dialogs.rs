@@ -5,9 +5,9 @@ use eframe::egui::{self, Align2, CursorIcon, Key, Modifiers, Sense};
 use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
-    AppBgMode, Justify, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE,
-    MIN_MARGIN, MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, PageTexture, Reply, Settings,
-    ThemePref, TitleStore, fmt_ts,
+    AppBgMode, BookFont, Bookmark, Justify, LineSpacing, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP,
+    MAX_UI_SCALE, MIN_FONT_SIZE, MIN_MARGIN, MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio,
+    PageTexture, Reply, SavedPoint, Settings, ThemePref, TitleStore, fmt_ts,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -38,6 +38,10 @@ pub enum Dialog {
         scroll_replies_bottom: bool,
     },
     Bookmarks,
+    SavedPoints,
+    Notes {
+        focused: bool,
+    },
     Recents {
         editing: Option<usize>,
         draft: String,
@@ -72,6 +76,9 @@ pub enum Outcome {
     },
     BookmarkOpen(usize),
     BookmarkDeleted(usize),
+    NoteOpen(usize),
+    SavedPointOpen(usize),
+    SavedPointDeleted(usize),
     OpenRecent {
         path: PathBuf,
         new_window: bool,
@@ -102,7 +109,10 @@ pub fn dialog_ui(
     dialog: &mut Dialog,
     page_count: usize,
     hits: &[Hit],
-    bookmarks: &[usize],
+    bookmarks: &[Bookmark],
+    saved_points: &[SavedPoint],
+    notes: &[crate::persist::Postit],
+    focused_page: Option<usize>,
     recents: &[PathBuf],
     titles: &TitleLoader,
     custom_titles: &TitleStore,
@@ -122,14 +132,18 @@ pub fn dialog_ui(
             }
         }
         Dialog::Bookmarks => "Bookmarks",
+        Dialog::SavedPoints => "Saved points",
+        Dialog::Notes { .. } => "Notes",
         Dialog::Recents { .. } => "Recent books",
         Dialog::Shortcuts => "Shortcuts",
         Dialog::Help => "About pagething",
     };
     let anchor = match dialog {
-        Dialog::Search { .. } | Dialog::Bookmarks | Dialog::Postit { .. } => {
-            (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0))
-        }
+        Dialog::Search { .. }
+        | Dialog::Bookmarks
+        | Dialog::SavedPoints
+        | Dialog::Notes { .. }
+        | Dialog::Postit { .. } => (Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0)),
         _ => (Align2::CENTER_CENTER, egui::Vec2::ZERO),
     };
 
@@ -137,7 +151,7 @@ pub fn dialog_ui(
     egui::Window::new(title)
         .anchor(anchor.0, anchor.1)
         .collapsible(false)
-        .resizable(false)
+        .resizable(matches!(dialog, Dialog::Settings { .. } | Dialog::Shortcuts))
         .open(&mut open)
         .show(ctx, |ui| match dialog {
             Dialog::Jump { input } => {
@@ -175,6 +189,9 @@ pub fn dialog_ui(
                 }
             }
             Dialog::Settings { draft } => {
+                egui::ScrollArea::vertical()
+                    .max_height((ctx.content_rect().height() - 120.0).max(180.0))
+                    .show(ui, |ui| {
                 let mut changed = false;
 
                 ui.label("Margins");
@@ -210,6 +227,48 @@ pub fn dialog_ui(
                 if font_size.drag_stopped() || (font_size.changed() && !font_size.dragged()) {
                     changed = true;
                 }
+
+                ui.horizontal(|ui| {
+                    ui.label("Font family");
+                    egui::ComboBox::from_id_salt("book_font")
+                        .selected_text(match draft.book_font {
+                            BookFont::Serif => "Serif",
+                            BookFont::Sans => "Sans serif",
+                            BookFont::Monospace => "Monospace",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (font, label) in [
+                                (BookFont::Serif, "Serif"),
+                                (BookFont::Sans, "Sans serif"),
+                                (BookFont::Monospace, "Monospace"),
+                            ] {
+                                if ui.selectable_value(&mut draft.book_font, font, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Line spacing");
+                    egui::ComboBox::from_id_salt("line_spacing")
+                        .selected_text(match draft.line_spacing {
+                            LineSpacing::Compact => "Compact",
+                            LineSpacing::Normal => "Normal",
+                            LineSpacing::Spacious => "Spacious",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (spacing, label) in [
+                                (LineSpacing::Compact, "Compact"),
+                                (LineSpacing::Normal, "Normal"),
+                                (LineSpacing::Spacious, "Spacious"),
+                            ] {
+                                if ui.selectable_value(&mut draft.line_spacing, spacing, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
 
                 ui.separator();
                 ui.label("UI scale");
@@ -418,6 +477,7 @@ pub fn dialog_ui(
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
                     outcome = Outcome::Close;
                 }
+                    });
             }
             Dialog::Search { input } => {
                 let edit = ui.add(
@@ -509,18 +569,33 @@ pub fn dialog_ui(
                 if !replies.is_empty() || index.is_some() {
                     ui.separator();
                     ui.label(egui::RichText::new("Replies").strong().small());
-                    // Fixed width so long replies wrap instead of widening the window.
-                    let list_width = 320.0;
                     egui::ScrollArea::vertical()
                         .id_salt("postit_replies")
                         .max_height(140.0)
                         .stick_to_bottom(*scroll_replies_bottom)
                         .show(ui, |ui| {
                             for (reply_index, reply) in replies.iter().enumerate() {
-                                ui.horizontal_top(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(fmt_ts(reply.created_at))
+                                            .weak()
+                                            .small(),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(reply.text.clone())
+                                                .font(crate::render::fonts::book(14.0)),
+                                        )
+                                        .wrap()
+                                        .selectable(false),
+                                    );
+                                    ui.add_space(8.0);
                                     if let Some(index) = index
                                         && ui
-                                            .small_button("x")
+                                            .add_sized(
+                                                [100.0, ui.spacing().interact_size.y],
+                                                egui::Button::new("Delete"),
+                                            )
                                             .on_hover_text("Delete reply")
                                             .clicked()
                                     {
@@ -529,40 +604,18 @@ pub fn dialog_ui(
                                             reply_index,
                                         };
                                     }
-                                    let copy_w = 48.0;
                                     if ui
                                         .add_sized(
-                                            [copy_w, ui.spacing().interact_size.y],
+                                            [100.0, ui.spacing().interact_size.y],
                                             egui::Button::new("Copy"),
                                         )
                                         .clicked()
                                     {
                                         ctx.copy_text(reply.text.clone());
                                     }
-                                    ui.label(
-                                        egui::RichText::new(fmt_ts(reply.created_at))
-                                            .weak()
-                                            .small(),
-                                    );
-                                    // Full text, wrapped to a fixed width (no truncate).
-                                    let text_w = (list_width - copy_w - 40.0).max(80.0);
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(text_w, ui.spacing().interact_size.y),
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(reply.text.clone())
-                                                        .font(
-                                                            crate::render::fonts::book(14.0),
-                                                        ),
-                                                )
-                                                .wrap()
-                                                .selectable(false),
-                                            );
-                                        },
-                                    );
+                                    ui.add_space(6.0);
                                 });
+                                ui.separator();
                             }
                             if *scroll_replies_bottom {
                                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
@@ -618,7 +671,7 @@ pub fn dialog_ui(
             Dialog::Bookmarks => {
                 let valid = bookmarks
                     .iter()
-                    .copied()
+                    .map(|bookmark| bookmark.page)
                     .filter(|&page| page > 0 && page <= page_count);
                 let mut any = false;
                 egui::ScrollArea::vertical()
@@ -638,6 +691,68 @@ pub fn dialog_ui(
                     });
                 if !any {
                     ui.label("No bookmarks yet. Press v on a page to add one.");
+                }
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::SavedPoints => {
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        if saved_points.is_empty() {
+                            ui.label("No saved points yet. Use Save point to store this canvas view.");
+                        }
+                        for (index, point) in saved_points.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let zoom = (point.view.zoom * 100.0).round() as u32;
+                                if ui.button(format!(
+                                    "Page {} · {}% · {}",
+                                    point.page,
+                                    zoom,
+                                    fmt_ts(point.saved_at)
+                                )).clicked() {
+                                    outcome = Outcome::SavedPointOpen(index);
+                                }
+                                if ui.small_button("x").on_hover_text("Remove saved point").clicked() {
+                                    outcome = Outcome::SavedPointDeleted(index);
+                                }
+                            });
+                        }
+                    });
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    outcome = Outcome::Close;
+                }
+            }
+            Dialog::Notes { focused } => {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(focused, true, "Focused page");
+                    ui.selectable_value(focused, false, "All pages");
+                });
+                ui.separator();
+                let mut any = false;
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for (index, note) in notes.iter().enumerate() {
+                        if *focused && Some(note.page) != focused_page {
+                            continue;
+                        }
+                        any = true;
+                        let first_line = note.text.lines().next().unwrap_or("(highlight)");
+                        let label = format!("Page {}  ·  {}", note.page, first_line);
+                        if ui.button(label).clicked() {
+                            outcome = Outcome::NoteOpen(index);
+                        }
+                        if !note.replies.is_empty() {
+                            ui.label(egui::RichText::new(format!("{} replies", note.replies.len())).weak().small());
+                        }
+                    }
+                });
+                if !any {
+                    ui.label(if *focused {
+                        "No notes on the focused page."
+                    } else {
+                        "No notes yet. Add one with the Note action."
+                    });
                 }
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
                     outcome = Outcome::Close;
@@ -776,68 +891,110 @@ pub fn dialog_ui(
                 }
             }
             Dialog::Shortcuts => {
-                let keyboard = [
+                let application = [
                     ("Ctrl+O", "Open EPUB"),
                     ("Ctrl+R", "Recent books"),
                     ("Ctrl+N", "Open a new window"),
                     ("Ctrl+Q", "Quit"),
                     ("F11", "Toggle fullscreen"),
+                    ("Ctrl+,", "Open settings"),
+                ];
+                let navigation = [
                     ("Ctrl+G", "Go to page"),
                     ("Ctrl+L", "Set columns"),
-                    ("Ctrl+F", "Search the book"),
-                    ("Ctrl+,", "Open settings"),
-                    ("a", "Add a post-it to the current page"),
-                    ("v", "Toggle a bookmark on the current page"),
-                    ("Ctrl+V", "Show bookmarks"),
-                    ("Ctrl+0", "Reset view"),
-                    ("Ctrl + / Ctrl =", "Zoom in on the book"),
-                    ("Ctrl -", "Zoom out on the book"),
-                    ("Ctrl+C", "Copy selected text"),
-                    ("c", "Copy selected text"),
-                    ("f", "Find selected text"),
-                    ("h", "Highlight selection (adds a post-it)"),
-                    ("q", "Clear text selection"),
                     ("z / Left / PgUp", "Previous page (wraps)"),
                     ("x / Right / PgDn", "Next page (wraps)"),
                     ("Up / Down", "Page above / below (by columns)"),
                     ("Home", "First page"),
                     ("End", "Last page"),
+                ];
+                let reading = [
+                    ("Ctrl++ / Ctrl+=", "Zoom in on the book"),
+                    ("Ctrl+-", "Zoom out on the book"),
+                ];
+                let search = [
+                    ("Ctrl+F", "Search the book"),
                     ("Enter", "Next search result"),
                     ("Shift+Enter", "Previous search result"),
                 ];
+                let selection = [
+                    ("a", "Add a post-it to the current page"),
+                    ("v", "Toggle a bookmark on the current page"),
+                    ("Ctrl+V", "Show bookmarks"),
+                    ("c / Ctrl+C", "Copy selected text"),
+                    ("f", "Search for selected text"),
+                    ("h", "Highlight selection (adds a post-it)"),
+                    ("q", "Clear text selection"),
+                    ("Shift+Left / Right", "Extend selection by character"),
+                    ("Shift+Up", "Select sentence; repeat to grow to paragraph"),
+                    ("Shift+Down", "Undo one marker-based expansion"),
+                    ("Escape", "Clear selection, or close the open dialog"),
+                ];
+                let keyboard_groups = [
+                    ("Application", application.as_slice()),
+                    ("Navigation", navigation.as_slice()),
+                    ("Reading", reading.as_slice()),
+                    ("Search", search.as_slice()),
+                    ("Selection and annotations", selection.as_slice()),
+                ];
                 let mouse = [
                     ("Left-drag", "Select text on a page"),
+                    ("Double-click", "Select a word"),
                     ("Middle-drag", "Pan the canvas"),
-                    ("Wheel", "Zoom toward the pointer"),
-                    ("Two-finger scroll", "Pan the canvas"),
+                    ("Vertical wheel", "Zoom toward the pointer"),
+                    ("Horizontal wheel", "Pan the canvas horizontally"),
+                    ("Two-finger scroll", "Pan horizontally and vertically"),
+                ];
+                let related_actions = [
+                    ("Save point", "Action bar or View menu"),
+                    ("Points", "View menu"),
+                    ("Notes panel", "Action bar or View menu"),
+                    ("Note for selection", "Text-selection popup"),
                 ];
 
                 egui::ScrollArea::vertical()
                     .max_height(420.0)
                     .show(ui, |ui| {
-                        ui.strong("Keyboard");
-                        egui::Grid::new("shortcuts_keyboard")
-                            .num_columns(2)
-                            .spacing([16.0, 4.0])
-                            .show(ui, |ui| {
-                                for (shortcut, action) in keyboard {
-                                    ui.monospace(shortcut);
-                                    ui.label(action);
-                                    ui.end_row();
-                                }
-                            });
-                        ui.add_space(8.0);
+                        ui.heading("Keyboard");
+                        for (section, entries) in keyboard_groups {
+                            ui.separator();
+                            ui.strong(section);
+                            ui.add_space(2.0);
+                            for (shortcut, action) in entries {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(*shortcut)
+                                            .monospace()
+                                            .background_color(ui.visuals().faint_bg_color),
+                                    );
+                                    ui.add(egui::Label::new(*action).wrap());
+                                });
+                            }
+                            ui.add_space(8.0);
+                        }
+
                         ui.strong("Mouse and trackpad");
-                        egui::Grid::new("shortcuts_pointer")
-                            .num_columns(2)
-                            .spacing([16.0, 4.0])
-                            .show(ui, |ui| {
-                                for (shortcut, action) in mouse {
-                                    ui.monospace(shortcut);
-                                    ui.label(action);
-                                    ui.end_row();
-                                }
+                        ui.separator();
+                        for (gesture, action) in mouse {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(gesture)
+                                        .monospace()
+                                        .background_color(ui.visuals().faint_bg_color),
+                                );
+                                ui.add(egui::Label::new(action).wrap());
                             });
+                        }
+
+                        ui.add_space(8.0);
+                        ui.strong("Related actions");
+                        ui.separator();
+                        for (action, location) in related_actions {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(action).strong());
+                                ui.add(egui::Label::new(location).wrap());
+                            });
+                        }
                     });
                 if ui.input(|i| i.key_pressed(Key::Escape)) {
                     outcome = Outcome::Close;

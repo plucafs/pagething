@@ -7,7 +7,7 @@ use eframe::egui::{
 
 use crate::book::blocks::{Block, Span};
 use crate::book::paginate::{self, BlockMetrics};
-use crate::persist::Justify;
+use crate::persist::{BookFont, Justify, LineSpacing};
 use crate::render::fonts;
 use crate::render::theme::PageColors;
 
@@ -221,10 +221,11 @@ fn push_spans(
     color: Color32,
     code_bg: Color32,
     line_height: f32,
+    book_font: BookFont,
 ) {
     for span in spans {
         let mut format = egui::TextFormat {
-            font_id: fonts::book(size),
+            font_id: fonts::book_with(book_font, size, span.bold),
             color,
             line_height: Some(line_height),
             ..Default::default()
@@ -232,8 +233,6 @@ fn push_spans(
         if span.code {
             format.font_id = FontId::monospace(size * 0.9);
             format.background = code_bg;
-        } else if span.bold {
-            format.font_id = fonts::bold(size);
         }
         format.italics = span.italic;
         job.append(&span.text, 0.0, format);
@@ -255,6 +254,35 @@ pub fn layout_blocks(
     content_height: f32,
     colors: &PageColors,
     justify: Justify,
+) -> Vec<LaidBlock> {
+    layout_blocks_with_typography(
+        ctx,
+        blocks,
+        chapter_starts,
+        image_sizes,
+        body_size,
+        content_width,
+        content_height,
+        colors,
+        justify,
+        BookFont::Serif,
+        LineSpacing::Normal,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn layout_blocks_with_typography(
+    ctx: &Context,
+    blocks: &[Block],
+    chapter_starts: &[usize],
+    image_sizes: &HashMap<String, Vec2>,
+    body_size: f32,
+    content_width: f32,
+    content_height: f32,
+    colors: &PageColors,
+    justify: Justify,
+    book_font: BookFont,
+    line_spacing: LineSpacing,
 ) -> Vec<LaidBlock> {
     let mut flat = Vec::new();
     flatten(blocks, 0.0, Some(chapter_starts), &mut flat);
@@ -280,12 +308,17 @@ pub fn layout_blocks(
                     body_size,
                     colors.body,
                     colors.code_bg,
-                    round_up_to_pixel(body_size * 1.4, ctx.pixels_per_point()),
+                    round_up_to_pixel(
+                        body_size * line_spacing.multiplier(),
+                        ctx.pixels_per_point(),
+                    ),
+                    book_font,
                 );
                 if !fb.flush
                     && let Some(first) = job.sections.first_mut()
                 {
-                    first.leading_space += body_size * 2.0;
+                    first.leading_space += body_size * 2.0 * line_spacing.multiplier()
+                        / LineSpacing::Normal.multiplier();
                 }
                 if job.text.is_empty() {
                     continue;
@@ -321,6 +354,7 @@ pub fn layout_blocks(
                     colors.heading,
                     colors.code_bg,
                     size * HEADING_LEADING,
+                    book_font,
                 );
                 if job.text.is_empty() {
                     continue;

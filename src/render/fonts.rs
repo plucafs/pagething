@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, FontId};
 
+use crate::persist::BookFont;
+
 const GELASIO: &str = "gelasio";
 const GELASIO_BOLD: &str = "gelasio-bold";
 pub const BOOK_FAMILY: &str = "pagething-book";
@@ -62,6 +64,16 @@ pub fn book(size: f32) -> FontId {
 
 pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(BOOK_BOLD_FAMILY.into()))
+}
+
+pub fn book_with(family: BookFont, size: f32, bold: bool) -> FontId {
+    let family = match (family, bold) {
+        (BookFont::Serif, true) => FontFamily::Name(BOOK_BOLD_FAMILY.into()),
+        (BookFont::Serif, false) => FontFamily::Name(BOOK_FAMILY.into()),
+        (BookFont::Sans, _) => FontFamily::Proportional,
+        (BookFont::Monospace, _) => FontFamily::Monospace,
+    };
+    FontId::new(size, family)
 }
 
 #[cfg(test)]

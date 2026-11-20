@@ -69,6 +69,90 @@ pub fn hit_test(page: &Page, laid: &[LaidBlock], margins: Margins, page_pos: Vec
     None
 }
 
+pub fn word_at(page_index: usize, page: &Page, laid: &[LaidBlock], loc: Loc) -> Option<Selection> {
+    let item = page.items.get(loc.item)?;
+    let block = laid.get(item.block)?;
+    let LaidKind::Text { galley, .. } = &block.kind else {
+        return None;
+    };
+    let chars: Vec<char> = galley.text().chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let cursor = loc.char.min(chars.len().saturating_sub(1));
+    let word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
+    if !word_char(chars[cursor]) {
+        return None;
+    }
+    let mut start = cursor;
+    let mut end = cursor + 1;
+    while start > 0 && word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    while end < chars.len() && word_char(chars[end]) {
+        end += 1;
+    }
+    Some(Selection {
+        page: page_index,
+        anchor: Loc {
+            item: loc.item,
+            char: start,
+        },
+        cursor: Loc {
+            item: loc.item,
+            char: end,
+        },
+    })
+}
+
+pub fn move_cursor(page: &Page, laid: &[LaidBlock], mut loc: Loc, forward: bool) -> Loc {
+    if forward {
+        if let Some(item) = page.items.get(loc.item)
+            && let Some(block) = laid.get(item.block)
+            && let LaidKind::Text { galley, .. } = &block.kind
+        {
+            let len = galley.text().chars().count();
+            if loc.char < len {
+                loc.char += 1;
+                return loc;
+            }
+        }
+        for item_index in loc.item.saturating_add(1)..page.items.len() {
+            let Some(item) = page.items.get(item_index) else {
+                continue;
+            };
+            let Some(block) = laid.get(item.block) else {
+                continue;
+            };
+            if let LaidKind::Text { .. } = &block.kind {
+                return Loc {
+                    item: item_index,
+                    char: 0,
+                };
+            }
+        }
+    } else if loc.char > 0 {
+        loc.char -= 1;
+        return loc;
+    } else {
+        for item_index in (0..loc.item).rev() {
+            let Some(item) = page.items.get(item_index) else {
+                continue;
+            };
+            let Some(block) = laid.get(item.block) else {
+                continue;
+            };
+            if let LaidKind::Text { galley, .. } = &block.kind {
+                return Loc {
+                    item: item_index,
+                    char: galley.text().chars().count(),
+                };
+            }
+        }
+    }
+    loc
+}
+
 /// Selected text of one page: pieces `[start.item..=end.item]`, newline between pieces.
 pub fn copy_text(page: &Page, laid: &[LaidBlock], sel: &Selection) -> String {
     let (a, b) = sel.range();
@@ -217,6 +301,172 @@ pub fn selection_offsets(page: &Page, sel: &Selection) -> Option<(usize, usize)>
         Some(seg.start + loc.char)
     };
     Some((to_plain(&a)?, to_plain(&b)?))
+}
+
+/// Expand the current text range to both boundaries of its containing sentence.
+pub fn expand_to_sentence(page: &Page, laid: &[LaidBlock], sel: &Selection) -> Option<Selection> {
+    let (start, end) = selection_offsets(page, sel)?;
+    let chars: Vec<char> = page.plain_text.chars().collect();
+    let (visible_start, visible_end) = visible_range(page, laid)?;
+    let (paragraph_start, paragraph_end) =
+        paragraph_bounds(&chars, start, end, visible_start, visible_end);
+    let sentence_start = chars[paragraph_start..start.min(paragraph_end)]
+        .iter()
+        .rposition(|ch| is_sentence_end(*ch))
+        .map_or(paragraph_start, |index| paragraph_start + index + 1);
+    let sentence_end = next_sentence_end(&chars, end.min(paragraph_end), paragraph_end);
+    selection_at_offsets(
+        page,
+        sel.page,
+        trim_leading_space(&chars, sentence_start, start),
+        sentence_end,
+    )
+}
+
+/// Grow a sentence selection by one neighboring sentence on each side.
+pub fn expand_to_adjacent_sentence(
+    page: &Page,
+    laid: &[LaidBlock],
+    sel: &Selection,
+) -> Option<Selection> {
+    let (start, end) = selection_offsets(page, sel)?;
+    let chars: Vec<char> = page.plain_text.chars().collect();
+    let (visible_start, visible_end) = visible_range(page, laid)?;
+    let (paragraph_start, paragraph_end) =
+        paragraph_bounds(&chars, start, end, visible_start, visible_end);
+
+    let previous_markers: Vec<usize> = chars[paragraph_start..start.min(paragraph_end)]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ch)| is_sentence_end(*ch).then_some(paragraph_start + index))
+        .collect();
+    let next_start = if previous_markers.len() >= 2 {
+        previous_markers[previous_markers.len() - 2] + 1
+    } else {
+        paragraph_start
+    };
+    let next_end = next_sentence_end(&chars, end.min(paragraph_end), paragraph_end);
+
+    selection_at_offsets(
+        page,
+        sel.page,
+        trim_leading_space(&chars, next_start, start),
+        next_end,
+    )
+}
+
+fn paragraph_bounds(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    visible_start: usize,
+    visible_end: usize,
+) -> (usize, usize) {
+    let start = start.clamp(visible_start, visible_end.min(chars.len()));
+    let end = end.clamp(start, visible_end.min(chars.len()));
+    let paragraph_start = chars[visible_start.min(start)..start]
+        .iter()
+        .rposition(|ch| *ch == '\n')
+        .map_or(visible_start, |index| visible_start + index + 1);
+    let paragraph_end = chars[end..visible_end.min(chars.len())]
+        .iter()
+        .position(|ch| *ch == '\n')
+        .map_or(visible_end.min(chars.len()), |index| end + index);
+    (paragraph_start, paragraph_end)
+}
+
+fn trim_leading_space(chars: &[char], mut start: usize, end: usize) -> usize {
+    while start < end
+        && chars
+            .get(start)
+            .is_some_and(|ch| ch.is_whitespace() || is_sentence_closer(*ch))
+    {
+        start += 1;
+    }
+    start
+}
+
+fn next_sentence_end(chars: &[char], start: usize, limit: usize) -> usize {
+    let Some(marker) = chars[start..limit]
+        .iter()
+        .position(|ch| is_sentence_end(*ch))
+    else {
+        return limit;
+    };
+    let mut end = start + marker + 1;
+    while end < limit && is_sentence_closer(chars[end]) {
+        end += 1;
+    }
+    end
+}
+
+fn is_sentence_end(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?')
+}
+
+fn is_sentence_closer(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | ')' | ']' | '}' | '”' | '’')
+}
+
+fn selection_at_offsets(
+    page: &Page,
+    page_index: usize,
+    start: usize,
+    end: usize,
+) -> Option<Selection> {
+    Some(Selection {
+        page: page_index,
+        anchor: loc_at_offset(page, start)?,
+        cursor: loc_at_offset(page, end)?,
+    })
+}
+
+fn visible_range(page: &Page, laid: &[LaidBlock]) -> Option<(usize, usize)> {
+    let mut start = usize::MAX;
+    let mut end = 0;
+    for item in &page.items {
+        let Some(segment) = page
+            .segments
+            .iter()
+            .find(|segment| segment.block == item.block)
+        else {
+            continue;
+        };
+        let Some(block) = laid.get(item.block) else {
+            continue;
+        };
+        let LaidKind::Text { galley, .. } = &block.kind else {
+            continue;
+        };
+        let row_offset = |row: usize| {
+            galley.rows[..row.min(galley.rows.len())]
+                .iter()
+                .map(|row| row.char_count_including_newline().0)
+                .sum::<usize>()
+        };
+        start = start.min(segment.start + row_offset(item.row_start));
+        end = end.max((segment.start + row_offset(item.row_end)).min(segment.end));
+    }
+    (start != usize::MAX).then_some((start, end))
+}
+
+fn loc_at_offset(page: &Page, offset: usize) -> Option<Loc> {
+    for (item_index, item) in page.items.iter().enumerate() {
+        let Some(segment) = page
+            .segments
+            .iter()
+            .find(|segment| segment.block == item.block)
+        else {
+            continue;
+        };
+        if (segment.start..=segment.end).contains(&offset) {
+            return Some(Loc {
+                item: item_index,
+                char: offset.saturating_sub(segment.start),
+            });
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -436,5 +686,107 @@ mod tests {
             cursor: Loc { item: 9, char: 1 },
         };
         assert_eq!(selection_offsets(&page, &missing), None);
+    }
+
+    #[test]
+    fn shift_up_selects_the_sentence_then_grows_to_its_paragraph() {
+        let text = "Zero. First. Second, word here. Third. Fourth!\nNext paragraph.";
+        let ctx = eframe::egui::Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+        let blocks = [crate::book::blocks::Block::Para(vec![
+            crate::book::blocks::Span {
+                text: text.to_owned(),
+                ..Default::default()
+            },
+        ])];
+        let mut laid = Vec::new();
+        let mut pages = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            laid = crate::render::layout::layout_blocks(
+                ui.ctx(),
+                &blocks,
+                &[],
+                &Default::default(),
+                16.0,
+                2000.0,
+                1200.0,
+                &crate::render::theme::PageColors::PAPER,
+                crate::persist::Justify::Left,
+            );
+            let metrics: Vec<_> = laid.iter().map(|block| block.metrics()).collect();
+            pages = crate::book::paginate::paginate(&metrics, 1200.0, false);
+            crate::render::layout::attach_page_texts(&mut pages, &laid);
+        });
+        output.textures_delta.clear();
+        let page = &pages[0];
+        let start = text.find("word").unwrap();
+        let selection = Selection {
+            page: 0,
+            anchor: Loc {
+                item: 0,
+                char: start,
+            },
+            cursor: Loc {
+                item: 0,
+                char: start + "beta".len(),
+            },
+        };
+
+        let sentence = expand_to_sentence(page, &laid, &selection).unwrap();
+        let extract = |selection: &Selection| {
+            let (start, end) = selection_offsets(page, selection).unwrap();
+            page.plain_text
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect::<String>()
+        };
+        assert_eq!(extract(&sentence), "Second, word here.");
+
+        let wider = expand_to_adjacent_sentence(page, &laid, &sentence).unwrap();
+        assert_eq!(extract(&wider), "First. Second, word here. Third.");
+
+        let paragraph = expand_to_adjacent_sentence(page, &laid, &wider).unwrap();
+        assert_eq!(
+            extract(&paragraph),
+            "Zero. First. Second, word here. Third. Fourth!"
+        );
+    }
+
+    #[test]
+    fn double_click_word_selection_uses_character_offsets() {
+        let ctx = eframe::egui::Context::default();
+        crate::render::fonts::install_for_tests(&ctx);
+        let blocks = [crate::book::blocks::Block::Para(vec![
+            crate::book::blocks::Span {
+                text: "One café word".to_owned(),
+                ..Default::default()
+            },
+        ])];
+        let mut laid = Vec::new();
+        let mut pages = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            laid = crate::render::layout::layout_blocks(
+                ui.ctx(),
+                &blocks,
+                &[],
+                &Default::default(),
+                16.0,
+                300.0,
+                600.0,
+                &crate::render::theme::PageColors::PAPER,
+                crate::persist::Justify::Left,
+            );
+            let metrics: Vec<_> = laid.iter().map(|block| block.metrics()).collect();
+            pages = crate::book::paginate::paginate(&metrics, 600.0, false);
+            crate::render::layout::attach_page_texts(&mut pages, &laid);
+        });
+        output.textures_delta.clear();
+
+        let selection = word_at(0, &pages[0], &laid, Loc { item: 0, char: 6 }).unwrap();
+        assert_eq!(
+            selection.range(),
+            (Loc { item: 0, char: 4 }, Loc { item: 0, char: 8 })
+        );
     }
 }

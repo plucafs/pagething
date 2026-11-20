@@ -11,20 +11,28 @@ use crate::book::paginate;
 use crate::book::prepare::{self, PreparedBook};
 use crate::book::progress::{LoadProgress, LoadStage};
 use crate::canvas::{View, grid};
+use crate::features::annotation_export;
 use crate::features::dialogs::{self, Dialog, Outcome};
 use crate::features::recents::TitleLoader;
 use crate::features::search::{self, Hit};
 use crate::features::selection::{self, Selection};
 use crate::features::toast::Toasts;
 use crate::persist::{
-    BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Reply, Settings, SettingsStore,
-    ThemePref, TitleStore, ViewState, ViewStore, fmt_ts, unix_now,
+    Bookmark, BookmarkStore, Highlight, HighlightStore, Postit, PostitStore, Reply, SavedPoint,
+    SavedPointStore, Settings, SettingsStore, TextAnchor, ThemePref, TitleStore, ViewState,
+    ViewStore, fmt_ts, unix_now,
 };
 use crate::render::layout::{self, DisplayCache, LaidBlock, LaidKind, Margins};
 use crate::render::page_view::{self, PageView};
 use crate::render::theme;
 
 const MAX_RECENTS: usize = 10;
+const MAX_SAVED_POINTS: usize = 10;
+
+fn push_saved_point(points: &mut Vec<SavedPoint>, point: SavedPoint) {
+    points.insert(0, point);
+    points.truncate(MAX_SAVED_POINTS);
+}
 
 struct LoadedBook {
     title: Option<String>,
@@ -70,6 +78,7 @@ enum ImageDecodeMessage {
 #[derive(Clone, Copy)]
 enum ToolbarAction {
     Bookmark,
+    SavePoint,
     Note,
     Search,
     Previous,
@@ -77,11 +86,14 @@ enum ToolbarAction {
     ZoomOut,
     ZoomReset,
     ZoomIn,
+    Notes,
+    GoBack,
 }
 
 #[derive(Clone, Copy)]
 enum SelectionAction {
     Copy,
+    Note,
     Highlight,
     Find,
     Clear,
@@ -95,14 +107,17 @@ pub struct PagethingApp {
     recent_titles: TitleLoader,
     title_store: TitleStore,
     want_open: bool,
+    pending_export: Option<bool>,
     display_cache: DisplayCache,
     page_textures: page_view::PageTextures,
     view_store: ViewStore,
     postit_store: PostitStore,
     bookmark_store: BookmarkStore,
+    saved_point_store: SavedPointStore,
     highlight_store: HighlightStore,
     postits: Vec<Postit>,
-    bookmarks: Vec<usize>,
+    bookmarks: Vec<Bookmark>,
+    saved_points: Vec<SavedPoint>,
     highlights: Vec<Highlight>,
     settings: SettingsStore,
     current_book: Option<PathBuf>,
@@ -114,8 +129,12 @@ pub struct PagethingApp {
     pending_selection_search: Option<String>,
     pending_postit: bool,
     pending_bookmark: bool,
+    pending_save_point: bool,
+    pending_note_anchor: Option<(usize, TextAnchor)>,
+    note_return: Option<View>,
     text_rendering: fastframe_text::TextRendering,
     selection: Option<Selection>,
+    selection_history: Vec<Selection>,
     selection_drag: bool,
     search_hits: Vec<Hit>,
     search_query: String,
@@ -142,14 +161,17 @@ impl PagethingApp {
             recent_titles: TitleLoader::new(),
             title_store: TitleStore::load(),
             want_open: false,
+            pending_export: None,
             display_cache: DisplayCache::default(),
             page_textures: page_view::PageTextures::load(&cc.egui_ctx),
             view_store: ViewStore::load(),
             postit_store: PostitStore::load("postits.json"),
             bookmark_store: BookmarkStore::load("bookmarks.json"),
+            saved_point_store: SavedPointStore::load("saved_points.json"),
             highlight_store: HighlightStore::load("highlights.json"),
             postits: Vec::new(),
             bookmarks: Vec::new(),
+            saved_points: Vec::new(),
             highlights: Vec::new(),
             settings,
             current_book: None,
@@ -160,8 +182,12 @@ impl PagethingApp {
             pending_selection_search: None,
             pending_postit: false,
             pending_bookmark: false,
+            pending_save_point: false,
+            pending_note_anchor: None,
+            note_return: None,
             text_rendering,
             selection: None,
+            selection_history: Vec::new(),
             selection_drag: false,
             search_hits: Vec::new(),
             search_query: String::new(),
@@ -197,8 +223,11 @@ impl PagethingApp {
 
     fn open_path(&mut self, path: PathBuf) {
         self.stash_view();
+        self.note_return = None;
+        self.pending_note_anchor = None;
         self.display_cache.clear();
         self.selection = None;
+        self.selection_history.clear();
         self.selection_drag = false;
         self.search_hits.clear();
         self.search_query.clear();
@@ -206,6 +235,8 @@ impl PagethingApp {
         self.postits = self.postit_store.get(&path).to_vec();
         self.bookmarks = self.bookmark_store.get(&path).to_vec();
         self.highlights = self.highlight_store.get(&path).to_vec();
+        self.saved_points = self.saved_point_store.get(&path).to_vec();
+        self.saved_points.truncate(MAX_SAVED_POINTS);
         self.view = self
             .view_store
             .get(&path)
@@ -278,7 +309,7 @@ impl PagethingApp {
         let page_size = grid::page_size(settings.page_ratio);
         let width = layout::content_width(&margins, page_size);
         let height = layout::content_height(&margins, page_size);
-        let laid = layout::layout_blocks(
+        let laid = layout::layout_blocks_with_typography(
             ctx,
             &raw.blocks,
             &raw.chapter_starts,
@@ -288,6 +319,8 @@ impl PagethingApp {
             height,
             &theme::page_colors(&settings),
             settings.justify,
+            settings.book_font,
+            settings.line_spacing,
         );
         let metrics: Vec<_> = laid.iter().map(|b| b.metrics()).collect();
         let mut pages = paginate::paginate(&metrics, height, has_cover);
@@ -379,6 +412,23 @@ impl PagethingApp {
         if let Some(raw) = prepared {
             let book = Self::build_book(ctx, raw, self.settings.settings());
             self.phase = Phase::Ready(book);
+            if let Phase::Ready(book) = &self.phase {
+                Self::capture_annotation_anchors(
+                    &mut self.postits,
+                    &mut self.highlights,
+                    &mut self.bookmarks,
+                    &book.pages,
+                );
+                Self::remap_annotations(
+                    &mut self.postits,
+                    &mut self.highlights,
+                    &mut self.bookmarks,
+                    &book.pages,
+                );
+            }
+            self.save_postits();
+            self.save_highlights();
+            self.save_bookmarks();
             return;
         }
 
@@ -440,7 +490,13 @@ impl PagethingApp {
         let page_size = grid::page_size(settings.page_ratio);
         let width = layout::content_width(&margins, page_size);
         let height = layout::content_height(&margins, page_size);
-        book.laid = layout::layout_blocks(
+        Self::capture_annotation_anchors(
+            &mut self.postits,
+            &mut self.highlights,
+            &mut self.bookmarks,
+            &book.pages,
+        );
+        book.laid = layout::layout_blocks_with_typography(
             ctx,
             &book.blocks,
             &book.chapter_starts,
@@ -450,16 +506,170 @@ impl PagethingApp {
             height,
             &theme::page_colors(&settings),
             settings.justify,
+            settings.book_font,
+            settings.line_spacing,
         );
         let metrics: Vec<_> = book.laid.iter().map(|b| b.metrics()).collect();
         book.pages = paginate::paginate(&metrics, height, book.cover.is_some());
         layout::attach_page_texts(&mut book.pages, &book.laid);
+        Self::remap_annotations(
+            &mut self.postits,
+            &mut self.highlights,
+            &mut self.bookmarks,
+            &book.pages,
+        );
         self.display_cache.clear();
         self.selection = None;
+        self.selection_history.clear();
         self.selection_drag = false;
         self.search_hits.clear();
         self.search_query.clear();
         self.search_index = 0;
+        self.save_postits();
+        self.save_highlights();
+        self.save_bookmarks();
+    }
+
+    fn anchor_for_range(page: &paginate::Page, start: usize, end: usize) -> Option<TextAnchor> {
+        let chars: Vec<char> = page.plain_text.chars().collect();
+        let start = start.min(chars.len());
+        let end = end.min(chars.len()).max(start);
+        if start == end {
+            return None;
+        }
+        Some(TextAnchor {
+            quote: chars[start..end].iter().collect(),
+            before: chars[start.saturating_sub(24)..start].iter().collect(),
+            after: chars[end..(end + 24).min(chars.len())].iter().collect(),
+        })
+    }
+
+    fn page_anchor(page: &paginate::Page) -> Option<TextAnchor> {
+        let chars: Vec<char> = page.plain_text.chars().collect();
+        let start = chars.iter().position(|ch| !ch.is_whitespace())?;
+        Self::anchor_for_range(page, start, (start + 40).min(chars.len()))
+    }
+
+    fn locate_anchor(
+        pages: &[paginate::Page],
+        anchor: &TextAnchor,
+    ) -> Option<(usize, usize, usize)> {
+        let needle: Vec<char> = anchor.quote.chars().collect();
+        if needle.is_empty() {
+            return None;
+        }
+        let before: Vec<char> = anchor.before.chars().collect();
+        let after: Vec<char> = anchor.after.chars().collect();
+        let mut best: Option<(usize, usize, usize, usize)> = None;
+        for (page_index, page) in pages.iter().enumerate() {
+            let chars: Vec<char> = page.plain_text.chars().collect();
+            if needle.len() > chars.len() {
+                continue;
+            }
+            for start in 0..=chars.len() - needle.len() {
+                if chars[start..start + needle.len()] != needle {
+                    continue;
+                }
+                let prefix_len = before.len().min(start);
+                let suffix_len = after.len().min(chars.len() - start - needle.len());
+                let prefix_match = (0..prefix_len)
+                    .take_while(|offset| {
+                        before[before.len() - 1 - offset] == chars[start - 1 - offset]
+                    })
+                    .count();
+                let suffix_match = (0..suffix_len)
+                    .take_while(|offset| after[*offset] == chars[start + needle.len() + offset])
+                    .count();
+                let score = prefix_match + suffix_match;
+                if best.is_none_or(|(_, _, _, current)| score > current) {
+                    best = Some((page_index, start, start + needle.len(), score));
+                }
+            }
+        }
+        best.map(|(page, start, end, _)| (page, start, end))
+    }
+
+    fn capture_annotation_anchors(
+        notes: &mut [Postit],
+        highlights: &mut [Highlight],
+        bookmarks: &mut [Bookmark],
+        pages: &[paginate::Page],
+    ) {
+        for highlight in highlights.iter_mut().filter(|item| item.anchor.is_none()) {
+            if let Some(page) = highlight.page.checked_sub(1).and_then(|i| pages.get(i)) {
+                highlight.anchor = Self::anchor_for_range(page, highlight.start, highlight.end);
+            }
+        }
+        for note in notes.iter_mut().filter(|item| item.anchor.is_none()) {
+            let anchor = note.highlight.and_then(|(start, end)| {
+                note.page
+                    .checked_sub(1)
+                    .and_then(|i| pages.get(i))
+                    .and_then(|page| Self::anchor_for_range(page, start, end))
+            });
+            note.anchor = anchor.or_else(|| {
+                note.page
+                    .checked_sub(1)
+                    .and_then(|i| pages.get(i))
+                    .and_then(Self::page_anchor)
+            });
+        }
+        for bookmark in bookmarks.iter_mut().filter(|item| item.anchor.is_none()) {
+            bookmark.anchor = bookmark
+                .page
+                .checked_sub(1)
+                .and_then(|i| pages.get(i))
+                .and_then(Self::page_anchor);
+        }
+    }
+
+    fn remap_annotations(
+        notes: &mut [Postit],
+        highlights: &mut [Highlight],
+        bookmarks: &mut [Bookmark],
+        pages: &[paginate::Page],
+    ) {
+        for highlight in highlights {
+            if let Some(anchor) = &highlight.anchor
+                && let Some((page, start, end)) = Self::locate_anchor(pages, anchor)
+            {
+                highlight.page = page + 1;
+                highlight.start = start;
+                highlight.end = end;
+                highlight.anchor = Self::anchor_for_range(&pages[page], start, end);
+            } else if !pages.is_empty() {
+                highlight.page = highlight.page.clamp(1, pages.len());
+                let page = &pages[highlight.page - 1];
+                highlight.start = highlight.start.min(page.plain_text.chars().count());
+                highlight.end = highlight
+                    .end
+                    .min(page.plain_text.chars().count())
+                    .max(highlight.start);
+            }
+        }
+        for note in notes {
+            if let Some(anchor) = &note.anchor
+                && let Some((page, start, end)) = Self::locate_anchor(pages, anchor)
+            {
+                note.page = page + 1;
+                if note.highlight.is_some() {
+                    note.highlight = Some((start, end));
+                    note.anchor = Self::anchor_for_range(&pages[page], start, end);
+                }
+            } else if !pages.is_empty() {
+                note.page = note.page.clamp(1, pages.len());
+            }
+        }
+        for bookmark in bookmarks {
+            if let Some(anchor) = &bookmark.anchor
+                && let Some((page, _, _)) = Self::locate_anchor(pages, anchor)
+            {
+                bookmark.page = page + 1;
+                bookmark.anchor = Self::page_anchor(&pages[page]);
+            } else if !pages.is_empty() {
+                bookmark.page = bookmark.page.clamp(1, pages.len());
+            }
+        }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
@@ -537,7 +747,9 @@ impl PagethingApp {
                 }
             }
             let has_selection = self.selection.is_some_and(|sel| !sel.is_empty());
-            if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::H)) {
+            if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.clear_selection();
+            } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::H)) {
                 self.highlight_selection();
             } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::C)) {
                 self.copy_selection(ctx);
@@ -545,6 +757,37 @@ impl PagethingApp {
                 self.search_selection();
             } else if has_selection && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Q)) {
                 self.clear_selection();
+            }
+
+            let extend_up = ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowUp));
+            let contract_down = ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowDown));
+            if extend_up
+                && let (Some(current), Phase::Ready(book)) = (self.selection, &self.phase)
+                && let Some(page) = book.pages.get(current.page)
+                && let Some(expanded) = if self.selection_history.is_empty() {
+                    selection::expand_to_sentence(page, &book.laid, &current)
+                } else {
+                    selection::expand_to_adjacent_sentence(page, &book.laid, &current)
+                }
+                && expanded != current
+            {
+                self.selection_history.push(current);
+                self.selection = Some(expanded);
+            } else if contract_down && let Some(previous) = self.selection_history.pop() {
+                self.selection = Some(previous);
+            }
+
+            let extend_backward =
+                ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowLeft));
+            let extend_forward =
+                ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::ArrowRight));
+            if (extend_backward || extend_forward)
+                && let (Some(selection), Phase::Ready(book)) = (&mut self.selection, &self.phase)
+                && let Some(page) = book.pages.get(selection.page)
+            {
+                self.selection_history.clear();
+                selection.cursor =
+                    selection::move_cursor(page, &book.laid, selection.cursor, extend_forward);
             }
 
             if self.dialog.is_none() && matches!(self.phase, Phase::Ready(_)) {
@@ -571,10 +814,7 @@ impl PagethingApp {
                 }
             }
         }
-        let reset_view = ctx.input(|i| i.key_pressed(Key::Num0) && i.modifiers.ctrl);
-        if self.view.handle_shortcuts(ctx, canvas_rect) && reset_view {
-            self.toasts.show("View reset");
-        }
+        self.view.handle_shortcuts(ctx, canvas_rect);
     }
 
     fn copy_selection(&mut self, ctx: &egui::Context) {
@@ -610,6 +850,7 @@ impl PagethingApp {
     }
 
     fn clear_selection(&mut self) {
+        self.selection_history.clear();
         if self.selection.take().is_some() {
             self.selection_drag = false;
             self.toasts.show("Selection cleared");
@@ -629,6 +870,7 @@ impl PagethingApp {
             return;
         };
         let page_1based = sel.page + 1;
+        let anchor = Self::anchor_for_range(page, start, end);
         if let Some(pos) = self
             .highlights
             .iter()
@@ -644,16 +886,44 @@ impl PagethingApp {
             page: page_1based,
             start,
             end,
+            anchor: anchor.clone(),
             created_at: unix_now(),
         });
         self.save_highlights();
         if !text.trim().is_empty() {
-            self.postits
-                .push(Postit::new(page_1based, text, Some((start, end))));
+            let mut note = Postit::new(page_1based, text, Some((start, end)));
+            note.anchor = anchor;
+            self.postits.push(note);
             self.save_postits();
         }
         self.clear_selection();
         self.toasts.show("Highlighted");
+    }
+
+    fn note_selection(&mut self) {
+        let (Some(sel), Phase::Ready(book)) = (&self.selection, &self.phase) else {
+            return;
+        };
+        let Some(page) = book.pages.get(sel.page) else {
+            return;
+        };
+        let Some((start, end)) = selection::selection_offsets(page, sel) else {
+            return;
+        };
+        let Some(anchor) = Self::anchor_for_range(page, start, end) else {
+            return;
+        };
+        self.pending_note_anchor = Some((sel.page + 1, anchor));
+        self.dialog = Some(Dialog::Postit {
+            page: sel.page + 1,
+            index: None,
+            text: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            replies: Vec::new(),
+            reply_draft: String::new(),
+            scroll_replies_bottom: false,
+        });
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -711,6 +981,16 @@ impl PagethingApp {
                             draft: self.settings.settings(),
                         });
                     }
+                    if matches!(self.phase, Phase::Ready(_)) {
+                        if ui.button("Export annotations as Markdown…").clicked() {
+                            ui.close();
+                            self.pending_export = Some(false);
+                        }
+                        if ui.button("Export annotations as HTML…").clicked() {
+                            ui.close();
+                            self.pending_export = Some(true);
+                        }
+                    }
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Quit").shortcut_text("Ctrl+Q"))
@@ -721,7 +1001,22 @@ impl PagethingApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if self.note_return.is_some() && ui.button("Go back to previous view").clicked()
+                    {
+                        ui.close();
+                        if let Some(view) = self.note_return.take() {
+                            self.view = view;
+                        }
+                    }
                     ui.add_enabled_ui(matches!(self.phase, Phase::Ready(_)), |ui| {
+                        if ui.button("Save point").clicked() {
+                            ui.close();
+                            self.pending_save_point = true;
+                        }
+                        if ui.button("Points…").clicked() {
+                            ui.close();
+                            self.dialog = Some(Dialog::SavedPoints);
+                        }
                         if ui
                             .add(egui::Button::new("Go to page…").shortcut_text("Ctrl+G"))
                             .on_hover_text("Jump to a page number")
@@ -731,6 +1026,12 @@ impl PagethingApp {
                             self.dialog = Some(Dialog::Jump {
                                 input: String::new(),
                             });
+                        }
+                    });
+                    ui.add_enabled_ui(matches!(self.phase, Phase::Ready(_)), |ui| {
+                        if ui.button("Notes…").clicked() {
+                            ui.close();
+                            self.dialog = Some(Dialog::Notes { focused: true });
                         }
                     });
                     if ui
@@ -821,6 +1122,16 @@ impl PagethingApp {
                         {
                             action = Some(ToolbarAction::Bookmark);
                         }
+                        ui.separator();
+                        if ui
+                            .button("Save point")
+                            .on_hover_text(
+                                "Save this canvas position in the recent saved-points list",
+                            )
+                            .clicked()
+                        {
+                            action = Some(ToolbarAction::SavePoint);
+                        }
                         if ui
                             .button("Note")
                             .on_hover_text("Add a note to the current page (A)")
@@ -834,6 +1145,21 @@ impl PagethingApp {
                             .clicked()
                         {
                             action = Some(ToolbarAction::Search);
+                        }
+                        if ui
+                            .button("Notes")
+                            .on_hover_text("Browse notes on this page or across the book")
+                            .clicked()
+                        {
+                            action = Some(ToolbarAction::Notes);
+                        }
+                        if self.note_return.is_some()
+                            && ui
+                                .button("Go back")
+                                .on_hover_text("Restore the canvas view from before the note jump")
+                                .clicked()
+                        {
+                            action = Some(ToolbarAction::GoBack);
                         }
                         ui.separator();
                         if ui
@@ -860,7 +1186,7 @@ impl PagethingApp {
                         }
                         if ui
                             .button("Reset")
-                            .on_hover_text("Set zoom to 100%; Ctrl+0 resets the view")
+                            .on_hover_text("Set zoom to 100% without changing the canvas position")
                             .clicked()
                         {
                             action = Some(ToolbarAction::ZoomReset);
@@ -886,7 +1212,9 @@ impl PagethingApp {
                     self.toggle_bookmark_with_toast(page);
                 }
             }
+            ToolbarAction::SavePoint => self.save_point(canvas_rect),
             ToolbarAction::Note => {
+                self.pending_note_anchor = None;
                 if let Some(page) = self.current_page(canvas_rect) {
                     self.dialog = Some(Dialog::Postit {
                         page,
@@ -913,6 +1241,68 @@ impl PagethingApp {
                 self.toasts.show("Zoom reset");
             }
             ToolbarAction::ZoomIn => self.view.zoom_at(canvas_rect.center(), 1.2),
+            ToolbarAction::Notes => self.dialog = Some(Dialog::Notes { focused: true }),
+            ToolbarAction::GoBack => {
+                if let Some(view) = self.note_return.take() {
+                    self.view = view;
+                    self.toasts.show("Returned to previous view");
+                }
+            }
+        }
+    }
+
+    fn save_point(&mut self, canvas_rect: egui::Rect) {
+        let Some(page) = self.current_page(canvas_rect) else {
+            return;
+        };
+        push_saved_point(
+            &mut self.saved_points,
+            SavedPoint {
+                page,
+                view: ViewState {
+                    pan_x: self.view.pan.x,
+                    pan_y: self.view.pan.y,
+                    zoom: self.view.zoom,
+                },
+                saved_at: unix_now(),
+            },
+        );
+        self.save_saved_points();
+        self.toasts.show("Canvas point saved");
+    }
+
+    fn export_annotations(&mut self, html: bool) {
+        let Some(book) = self.current_book.as_ref() else {
+            self.toasts.show("Open a book before exporting annotations");
+            return;
+        };
+        let path = rfd::FileDialog::new()
+            .add_filter(
+                if html { "HTML" } else { "Markdown" },
+                if html { &["html"] } else { &["md"] },
+            )
+            .set_file_name(if html {
+                "annotations.html"
+            } else {
+                "annotations.md"
+            })
+            .save_file();
+        let Some(path) = path else { return };
+        let title = self.title_store.get(book).unwrap_or_else(|| {
+            book.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Book")
+        });
+        let content = if html {
+            annotation_export::html(title, &self.postits, &self.highlights, &self.bookmarks)
+        } else {
+            annotation_export::markdown(title, &self.postits, &self.highlights, &self.bookmarks)
+        };
+        match std::fs::write(&path, content) {
+            Ok(()) => self
+                .toasts
+                .show(format!("Exported annotations to {}", path.display())),
+            Err(error) => self.toasts.show(format!("Export failed: {error}")),
         }
     }
 
@@ -1010,6 +1400,7 @@ impl PagethingApp {
             return;
         }
         self.selection = None;
+        self.selection_history.clear();
         self.selection_drag = false;
         self.center_page(page, canvas_rect);
     }
@@ -1157,6 +1548,13 @@ impl PagethingApp {
                             action = Some(SelectionAction::Copy);
                         }
                         if ui
+                            .button("Note")
+                            .on_hover_text("Add a note about the selected text")
+                            .clicked()
+                        {
+                            action = Some(SelectionAction::Note);
+                        }
+                        if ui
                             .button("Highlight")
                             .on_hover_text("Highlight selection and add a note (H)")
                             .clicked()
@@ -1183,6 +1581,7 @@ impl PagethingApp {
 
         match action {
             Some(SelectionAction::Copy) => self.copy_selection(ctx),
+            Some(SelectionAction::Note) => self.note_selection(),
             Some(SelectionAction::Highlight) => self.highlight_selection(),
             Some(SelectionAction::Find) => self.search_selection(),
             Some(SelectionAction::Clear) => self.clear_selection(),
@@ -1307,7 +1706,20 @@ impl PagethingApp {
         {
             response.ctx.set_cursor_icon(egui::CursorIcon::Text);
         }
+        if response.double_clicked_by(PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some((page_index, loc)) = self.loc_at(canvas_rect, pos)
+            && let Phase::Ready(book) = &self.phase
+            && let Some(page) = book.pages.get(page_index)
+            && let Some(selection) = selection::word_at(page_index, page, &book.laid, loc)
+        {
+            self.selection = Some(selection);
+            self.selection_history.clear();
+            self.selection_drag = false;
+            return;
+        }
         if response.drag_started_by(PointerButton::Primary) {
+            self.selection_history.clear();
             let pointer = response.interact_pointer_pos();
             if pointer.is_some_and(|pos| postit_rects.iter().any(|rect| rect.contains(pos))) {
                 self.selection_drag = false;
@@ -1338,6 +1750,7 @@ impl PagethingApp {
     }
 
     fn apply_dialog(&mut self, canvas_rect: egui::Rect, ctx: &egui::Context) {
+        let focused_page = self.current_page(canvas_rect);
         let Some(dialog) = &mut self.dialog else {
             return;
         };
@@ -1355,6 +1768,9 @@ impl PagethingApp {
             page_count,
             &self.search_hits,
             &self.bookmarks,
+            &self.saved_points,
+            &self.postits,
+            focused_page,
             &self.recents,
             &self.recent_titles,
             &self.title_store,
@@ -1366,6 +1782,9 @@ impl PagethingApp {
                     self.search_hits.clear();
                     self.search_query.clear();
                     self.search_index = 0;
+                }
+                if matches!(dialog, Dialog::Postit { index: None, .. }) {
+                    self.pending_note_anchor = None;
                 }
                 self.dialog = None;
             }
@@ -1397,7 +1816,13 @@ impl PagethingApp {
                         existing.updated_at = unix_now();
                     }
                 } else {
-                    self.postits.push(Postit::new(page, text, None));
+                    let mut note = Postit::new(page, text, None);
+                    if let Some((anchor_page, anchor)) = self.pending_note_anchor.take()
+                        && anchor_page == page
+                    {
+                        note.anchor = Some(anchor);
+                    }
+                    self.postits.push(note);
                 }
                 self.save_postits();
                 self.toasts.show("Note saved");
@@ -1458,6 +1883,7 @@ impl PagethingApp {
             }
             Outcome::PostitDeleted(index) => {
                 self.dialog = None;
+                self.pending_note_anchor = None;
                 if index < self.postits.len() {
                     let note = self.postits.remove(index);
                     if let Some((start, end)) = note.highlight {
@@ -1474,10 +1900,35 @@ impl PagethingApp {
                 self.dialog = None;
                 self.jump_to_page(page, canvas_rect);
             }
+            Outcome::NoteOpen(index) => {
+                self.dialog = None;
+                if let Some(note) = self.postits.get(index) {
+                    self.note_return = Some(self.view.clone());
+                    self.jump_to_page(note.page, canvas_rect);
+                }
+            }
             Outcome::BookmarkDeleted(page) => {
-                self.bookmarks.retain(|&saved| saved != page);
+                self.bookmarks.retain(|saved| saved.page != page);
                 self.save_bookmarks();
                 self.toasts.show("Bookmark removed");
+            }
+            Outcome::SavedPointOpen(index) => {
+                self.dialog = None;
+                if let Some(point) = self.saved_points.get(index).copied() {
+                    self.view = View {
+                        pan: egui::vec2(point.view.pan_x, point.view.pan_y),
+                        zoom: point.view.zoom.clamp(0.1, 8.0),
+                    };
+                    self.selection = None;
+                    self.selection_history.clear();
+                    self.toasts.show(format!("Returned to page {}", point.page));
+                }
+            }
+            Outcome::SavedPointDeleted(index) => {
+                if index < self.saved_points.len() {
+                    self.saved_points.remove(index);
+                    self.save_saved_points();
+                }
             }
             Outcome::OpenRecent { path, new_window } => {
                 self.dialog = None;
@@ -1522,6 +1973,8 @@ impl PagethingApp {
                     || changed.font_size != prev.font_size
                     || changed.page_ratio != prev.page_ratio
                     || changed.justify != prev.justify
+                    || changed.book_font != prev.book_font
+                    || changed.line_spacing != prev.line_spacing
                 {
                     self.rebuild_ready_book(ctx);
                 }
@@ -1554,6 +2007,14 @@ impl PagethingApp {
         self.bookmark_store.save();
     }
 
+    fn save_saved_points(&mut self) {
+        let Some(book) = self.current_book.as_deref() else {
+            return;
+        };
+        self.saved_point_store.set(book, self.saved_points.clone());
+        self.saved_point_store.save();
+    }
+
     fn save_highlights(&mut self) {
         let Some(book) = self.current_book.as_deref() else {
             return;
@@ -1563,13 +2024,20 @@ impl PagethingApp {
     }
 
     fn toggle_bookmark(&mut self, page: usize) -> bool {
-        if let Some(index) = self.bookmarks.iter().position(|&saved| saved == page) {
+        if let Some(index) = self.bookmarks.iter().position(|saved| saved.page == page) {
             self.bookmarks.remove(index);
             self.save_bookmarks();
             false
         } else {
-            self.bookmarks.push(page);
-            self.bookmarks.sort_unstable();
+            let anchor = match &self.phase {
+                Phase::Ready(book) => book
+                    .pages
+                    .get(page.saturating_sub(1))
+                    .and_then(Self::page_anchor),
+                _ => None,
+            };
+            self.bookmarks.push(Bookmark { page, anchor });
+            self.bookmarks.sort_by_key(|saved| saved.page);
             self.save_bookmarks();
             true
         }
@@ -1605,6 +2073,7 @@ impl PagethingApp {
         if std::mem::take(&mut self.pending_postit)
             && let Some(page) = self.current_page(canvas_rect)
         {
+            self.pending_note_anchor = None;
             self.dialog = Some(Dialog::Postit {
                 page,
                 index: None,
@@ -1621,30 +2090,53 @@ impl PagethingApp {
         {
             self.toggle_bookmark_with_toast(page);
         }
+        if std::mem::take(&mut self.pending_save_point) {
+            self.save_point(canvas_rect);
+        }
 
         let painter = ui.painter().with_clip_rect(canvas_rect);
         painter.rect_filled(canvas_rect, 0.0, theme::app_bg(&self.settings.settings()));
         let mut postit_rects = Vec::new();
+        let mut empty_action = 0_u8;
 
         match &self.phase {
             Phase::Empty { error } => {
-                let (message, color) = match error {
-                    Some(e) => (
-                        format!("Could not open book: {e}"),
-                        Color32::from_rgb(220, 100, 100),
-                    ),
-                    None => (
-                        "Ctrl+O to open an EPUB".to_owned(),
-                        theme::hint_color(ui.ctx().theme()),
-                    ),
-                };
-                let font_id = egui::FontId::proportional(18.0);
-                let wrap_width = (canvas_rect.width() * 0.8).max(120.0);
-                let galley = ui
-                    .ctx()
-                    .fonts_mut(|f| f.layout(message, font_id, color, wrap_width));
-                let pos = canvas_rect.center() - galley.size() / 2.0;
-                painter.galley(pos, galley, color);
+                egui::Area::new(egui::Id::new("empty_reader_actions"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(canvas_rect.center())
+                    .pivot(egui::Align2::CENTER_CENTER)
+                    .show(ui.ctx(), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading("A quiet place to read");
+                            if let Some(error) = error {
+                                ui.colored_label(
+                                    Color32::from_rgb(220, 100, 100),
+                                    format!("Could not open book: {error}"),
+                                );
+                                if ui.button("Retry opening this book").clicked() {
+                                    empty_action = 3;
+                                }
+                            } else {
+                                ui.label("Open an EPUB or pick up where you left off.");
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Open EPUB…").clicked() {
+                                    empty_action = 1;
+                                }
+                                if ui.button("Recent books…").clicked() {
+                                    empty_action = 2;
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(
+                                    "Ctrl+O to open · drop an EPUB onto the canvas",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                        });
+                    });
             }
             Phase::Loading { progress, .. } => {
                 let center = canvas_rect.center();
@@ -1755,7 +2247,7 @@ impl PagethingApp {
                         screen_rect,
                         &pv,
                     );
-                    if self.bookmarks.contains(&(i + 1)) {
+                    if self.bookmarks.iter().any(|bookmark| bookmark.page == i + 1) {
                         let icon = egui::Rect::from_min_size(
                             screen_rect.min + egui::vec2(12.0, 12.0),
                             egui::vec2(14.0, 19.0),
@@ -2105,6 +2597,23 @@ impl PagethingApp {
             }
         }
 
+        match empty_action {
+            1 => self.want_open = true,
+            2 => {
+                self.dialog = Some(Dialog::Recents {
+                    editing: None,
+                    draft: String::new(),
+                });
+                self.recent_titles.ensure(&self.recents);
+            }
+            3 => {
+                if let Some(path) = self.current_book.clone() {
+                    self.open_path(path);
+                }
+            }
+            _ => {}
+        }
+
         self.handle_selection_input(canvas_rect, &response, &postit_rects);
 
         let ctx = ui.ctx().clone();
@@ -2133,6 +2642,9 @@ impl eframe::App for PagethingApp {
         }
         self.handle_shortcuts(&ctx, canvas_rect);
         self.run_file_dialog();
+        if let Some(html) = self.pending_export.take() {
+            self.export_annotations(html);
+        }
         self.handle_file_drop(&ctx);
         self.paint_canvas(ui);
         self.paint_drop_hover(ui, canvas_rect);
@@ -2202,4 +2714,144 @@ pub fn run() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(PagethingApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_page(text: &str) -> paginate::Page {
+        paginate::Page {
+            kind: paginate::PageKind::Content,
+            items: Vec::new(),
+            plain_text: text.to_owned(),
+            segments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn reflow_anchor_prefers_matching_source_context() {
+        let pages = [
+            text_page("A different target appears here."),
+            text_page("left target right"),
+        ];
+        let anchor = TextAnchor {
+            quote: "target".to_owned(),
+            before: "left ".to_owned(),
+            after: " right".to_owned(),
+        };
+        assert_eq!(
+            PagethingApp::locate_anchor(&pages, &anchor),
+            Some((1, 5, 11))
+        );
+    }
+
+    #[test]
+    fn legacy_page_annotations_receive_source_anchors() {
+        let pages = [text_page(
+            "The book begins on this page with a useful sentence.",
+        )];
+        let mut notes = vec![Postit::new(1, "A note".to_owned(), None)];
+        let mut highlights = vec![Highlight {
+            page: 1,
+            start: 4,
+            end: 8,
+            anchor: None,
+            created_at: 0,
+        }];
+        let mut bookmarks = vec![Bookmark {
+            page: 1,
+            anchor: None,
+        }];
+
+        PagethingApp::capture_annotation_anchors(
+            &mut notes,
+            &mut highlights,
+            &mut bookmarks,
+            &pages,
+        );
+
+        assert_eq!(highlights[0].anchor.as_ref().unwrap().quote, "book");
+        assert!(notes[0].anchor.is_some());
+        assert!(bookmarks[0].anchor.is_some());
+    }
+
+    #[test]
+    fn reflow_moves_highlights_notes_and_bookmarks_to_anchor_page() {
+        let pages = [
+            text_page("A new opening page."),
+            text_page("left target right"),
+        ];
+        let anchor = TextAnchor {
+            quote: "target".to_owned(),
+            before: "left ".to_owned(),
+            after: " right".to_owned(),
+        };
+        let mut notes = vec![
+            Postit {
+                page: 1,
+                text: "remember".to_owned(),
+                highlight: Some((0, 6)),
+                anchor: Some(anchor.clone()),
+                created_at: 0,
+                updated_at: 0,
+                replies: Vec::new(),
+                collapsed: false,
+            },
+            Postit {
+                page: 1,
+                text: "comment on this passage".to_owned(),
+                highlight: None,
+                anchor: Some(anchor.clone()),
+                created_at: 0,
+                updated_at: 0,
+                replies: Vec::new(),
+                collapsed: false,
+            },
+        ];
+        let mut highlights = vec![Highlight {
+            page: 1,
+            start: 0,
+            end: 6,
+            anchor: Some(anchor.clone()),
+            created_at: 0,
+        }];
+        let mut bookmarks = vec![Bookmark {
+            page: 1,
+            anchor: Some(anchor),
+        }];
+
+        PagethingApp::remap_annotations(&mut notes, &mut highlights, &mut bookmarks, &pages);
+
+        assert_eq!(notes[0].page, 2);
+        assert_eq!(notes[0].highlight, Some((5, 11)));
+        assert_eq!(notes[1].page, 2);
+        assert_eq!(notes[1].anchor.as_ref().unwrap().quote, "target");
+        assert_eq!(highlights[0].page, 2);
+        assert_eq!((highlights[0].start, highlights[0].end), (5, 11));
+        assert_eq!(bookmarks[0].page, 2);
+    }
+
+    #[test]
+    fn saved_point_history_keeps_only_the_ten_newest_entries() {
+        let mut points = Vec::new();
+        for page in 1..=12 {
+            push_saved_point(
+                &mut points,
+                SavedPoint {
+                    page,
+                    view: ViewState {
+                        pan_x: page as f32,
+                        pan_y: 0.0,
+                        zoom: 1.0,
+                    },
+                    saved_at: page as u64,
+                },
+            );
+        }
+
+        assert_eq!(points.len(), MAX_SAVED_POINTS);
+        assert_eq!(points.first().unwrap().page, 12);
+        assert_eq!(points.last().unwrap().page, 3);
+    }
 }
