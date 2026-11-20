@@ -109,6 +109,16 @@ pub enum PageMode {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum PageTexture {
+    Plain,
+    #[default]
+    FineGrain,
+    PaperFibers,
+    LinenWeave,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum AppBgMode {
     #[default]
     Dark,
@@ -140,6 +150,8 @@ pub struct Settings {
     #[serde(default = "default_page_font")]
     pub page_font: [u8; 3],
     #[serde(default)]
+    pub page_texture: PageTexture,
+    #[serde(default)]
     pub app_bg_mode: AppBgMode,
     #[serde(default = "default_app_bg")]
     pub app_bg: [u8; 3],
@@ -170,6 +182,7 @@ impl Default for Settings {
             page_mode: PageMode::default(),
             page_bg: default_page_bg(),
             page_font: default_page_font(),
+            page_texture: PageTexture::default(),
             app_bg_mode: AppBgMode::default(),
             app_bg: default_app_bg(),
             justify: Justify::default(),
@@ -537,6 +550,7 @@ mod tests {
             s.page_mode = PageMode::DarkPages;
             s.page_bg = [12, 34, 56];
             s.page_font = [78, 90, 123];
+            s.page_texture = PageTexture::LinenWeave;
             s.app_bg_mode = AppBgMode::Custom;
             s.app_bg = [150, 160, 170];
             s.justify = Justify::Center;
@@ -555,6 +569,7 @@ mod tests {
         assert_eq!(s.page_mode, PageMode::DarkPages);
         assert_eq!(s.page_bg, [12, 34, 56]);
         assert_eq!(s.page_font, [78, 90, 123]);
+        assert_eq!(s.page_texture, PageTexture::LinenWeave);
         assert_eq!(s.app_bg_mode, AppBgMode::Custom);
         assert_eq!(s.app_bg, [150, 160, 170]);
         assert_eq!(s.justify, Justify::Center);
@@ -635,8 +650,23 @@ mod tests {
     fn new_settings_default_for_legacy_files() {
         let settings: Settings = serde_json::from_str(r#"{"columns":6}"#).unwrap();
         assert_eq!(settings.page_ratio, PageRatio::TwoThree);
+        assert_eq!(settings.page_texture, PageTexture::FineGrain);
         assert_eq!(settings.justify, Justify::Justified);
         assert!(settings.toolbar);
+    }
+
+    #[test]
+    fn page_texture_modes_serialize_snake_case() {
+        for (texture, serialized) in [
+            (PageTexture::Plain, "plain"),
+            (PageTexture::FineGrain, "fine_grain"),
+            (PageTexture::PaperFibers, "paper_fibers"),
+            (PageTexture::LinenWeave, "linen_weave"),
+        ] {
+            let json = serde_json::to_string(&texture).unwrap();
+            assert_eq!(json, format!("\"{serialized}\""));
+            assert_eq!(serde_json::from_str::<PageTexture>(&json).unwrap(), texture);
+        }
     }
 
     #[test]

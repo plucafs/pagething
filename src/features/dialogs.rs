@@ -6,8 +6,8 @@ use crate::features::recents::TitleLoader;
 use crate::features::search::Hit;
 use crate::persist::{
     AppBgMode, Justify, MAX_FONT_SIZE, MAX_MARGIN, MAX_PAGE_GAP, MAX_UI_SCALE, MIN_FONT_SIZE,
-    MIN_MARGIN, MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, Reply, Settings, ThemePref,
-    TitleStore, fmt_ts,
+    MIN_MARGIN, MIN_PAGE_GAP, MIN_UI_SCALE, PageMode, PageRatio, PageTexture, Reply, Settings,
+    ThemePref, TitleStore, fmt_ts,
 };
 
 pub const MAX_COLUMNS: usize = 16;
@@ -223,34 +223,51 @@ pub fn dialog_ui(
                 }
 
                 ui.separator();
-                ui.label("Theme");
                 ui.horizontal(|ui| {
-                    for (pref, label) in [
-                        (ThemePref::Light, "Light"),
-                        (ThemePref::Dark, "Dark"),
-                        (ThemePref::System, "System"),
-                    ] {
-                        if ui.selectable_value(&mut draft.theme, pref, label).clicked() {
-                            changed = true;
-                        }
-                    }
+                    ui.label("Theme");
+                    egui::ComboBox::from_id_salt("theme")
+                        .selected_text(match draft.theme {
+                            ThemePref::Light => "Light",
+                            ThemePref::Dark => "Dark",
+                            ThemePref::System => "System",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (pref, label) in [
+                                (ThemePref::Light, "Light"),
+                                (ThemePref::Dark, "Dark"),
+                                (ThemePref::System, "System"),
+                            ] {
+                                if ui.selectable_value(&mut draft.theme, pref, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
                 });
 
-                ui.label("Page theme");
                 ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (PageMode::Paper, "Light"),
-                        (PageMode::DarkPages, "Dark"),
-                        (PageMode::Sepia, "Sepia"),
-                        (PageMode::Custom, "Custom"),
-                    ] {
-                        if ui
-                            .selectable_value(&mut draft.page_mode, mode, label)
-                            .clicked()
-                        {
-                            changed = true;
-                        }
-                    }
+                    ui.label("Page theme");
+                    egui::ComboBox::from_id_salt("page_theme")
+                        .selected_text(match draft.page_mode {
+                            PageMode::Paper => "Light",
+                            PageMode::DarkPages => "Dark",
+                            PageMode::Sepia => "Sepia",
+                            PageMode::Custom => "Custom",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (mode, label) in [
+                                (PageMode::Paper, "Light"),
+                                (PageMode::DarkPages, "Dark"),
+                                (PageMode::Sepia, "Sepia"),
+                                (PageMode::Custom, "Custom"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut draft.page_mode, mode, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
                 });
 
                 if draft.page_mode == PageMode::Custom {
@@ -274,21 +291,58 @@ pub fn dialog_ui(
                     });
                 }
 
-                ui.label("App background");
                 ui.horizontal(|ui| {
-                    for (mode, label) in [
-                        (AppBgMode::Dark, "Dark"),
-                        (AppBgMode::Light, "Light"),
-                        (AppBgMode::Custom, "Custom"),
-                    ] {
-                        if ui
-                            .selectable_value(&mut draft.app_bg_mode, mode, label)
-                            .clicked()
-                        {
-                            changed = true;
-                        }
-                    }
-                    if draft.app_bg_mode == AppBgMode::Custom {
+                    ui.label("Page texture");
+                    egui::ComboBox::from_id_salt("page_texture")
+                        .selected_text(match draft.page_texture {
+                            PageTexture::Plain => "Plain",
+                            PageTexture::FineGrain => "Fine grain",
+                            PageTexture::PaperFibers => "Paper fibers",
+                            PageTexture::LinenWeave => "Linen weave",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (texture, label) in [
+                                (PageTexture::Plain, "Plain"),
+                                (PageTexture::FineGrain, "Fine grain"),
+                                (PageTexture::PaperFibers, "Paper fibers"),
+                                (PageTexture::LinenWeave, "Linen weave"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut draft.page_texture, texture, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("App background");
+                    egui::ComboBox::from_id_salt("app_background")
+                        .selected_text(match draft.app_bg_mode {
+                            AppBgMode::Dark => "Dark",
+                            AppBgMode::Light => "Light",
+                            AppBgMode::Custom => "Custom",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (mode, label) in [
+                                (AppBgMode::Dark, "Dark"),
+                                (AppBgMode::Light, "Light"),
+                                (AppBgMode::Custom, "Custom"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut draft.app_bg_mode, mode, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+                if draft.app_bg_mode == AppBgMode::Custom {
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
                         let color = egui::widgets::color_picker::color_edit_button_srgb(
                             ui,
                             &mut draft.app_bg,
@@ -296,40 +350,61 @@ pub fn dialog_ui(
                         if color.drag_stopped() || (color.changed() && !color.dragged()) {
                             changed = true;
                         }
-                    }
+                    });
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Page size");
+                    egui::ComboBox::from_id_salt("page_size")
+                        .selected_text(match draft.page_ratio {
+                            PageRatio::Square => "1:1",
+                            PageRatio::ThreeFour => "3:4",
+                            PageRatio::A5 => "A5",
+                            PageRatio::TwoThree => "2:3",
+                            PageRatio::FiveEight => "5:8",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (ratio, label) in [
+                                (PageRatio::Square, "1:1"),
+                                (PageRatio::ThreeFour, "3:4"),
+                                (PageRatio::A5, "A5"),
+                                (PageRatio::TwoThree, "2:3"),
+                                (PageRatio::FiveEight, "5:8"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut draft.page_ratio, ratio, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
                 });
 
                 ui.separator();
-                ui.label("Page size");
                 ui.horizontal(|ui| {
-                    for (ratio, label) in [
-                        (PageRatio::Square, "1:1"),
-                        (PageRatio::ThreeFour, "3:4"),
-                        (PageRatio::A5, "A5"),
-                        (PageRatio::TwoThree, "2:3"),
-                        (PageRatio::FiveEight, "5:8"),
-                    ] {
-                        if ui.selectable_value(&mut draft.page_ratio, ratio, label).clicked() {
-                            changed = true;
-                        }
-                    }
-                });
-
-                ui.separator();
-                ui.label("Justification");
-                ui.horizontal(|ui| {
-                    for (justify, label) in [
-                        (Justify::Justified, "Justified"),
-                        (Justify::Left, "Left"),
-                        (Justify::Center, "Center"),
-                    ] {
-                        if ui
-                            .selectable_value(&mut draft.justify, justify, label)
-                            .clicked()
-                        {
-                            changed = true;
-                        }
-                    }
+                    ui.label("Justification");
+                    egui::ComboBox::from_id_salt("justification")
+                        .selected_text(match draft.justify {
+                            Justify::Justified => "Justified",
+                            Justify::Left => "Left",
+                            Justify::Center => "Center",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (justify, label) in [
+                                (Justify::Justified, "Justified"),
+                                (Justify::Left, "Left"),
+                                (Justify::Center, "Center"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut draft.justify, justify, label)
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            }
+                        });
                 });
 
                 ui.separator();

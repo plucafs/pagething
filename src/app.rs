@@ -90,6 +90,7 @@ pub struct PagethingApp {
     title_store: TitleStore,
     want_open: bool,
     display_cache: DisplayCache,
+    page_textures: page_view::PageTextures,
     view_store: ViewStore,
     postit_store: PostitStore,
     bookmark_store: BookmarkStore,
@@ -136,6 +137,7 @@ impl PagethingApp {
             title_store: TitleStore::load(),
             want_open: false,
             display_cache: DisplayCache::default(),
+            page_textures: page_view::PageTextures::load(&cc.egui_ctx),
             view_store: ViewStore::load(),
             postit_store: PostitStore::load("postits.json"),
             bookmark_store: BookmarkStore::load("bookmarks.json"),
@@ -1499,6 +1501,7 @@ impl PagethingApp {
                 let margins = Margins::uniform(settings.margin);
                 let page_size = grid::page_size(settings.page_ratio);
                 let colors = theme::page_colors(&settings);
+                let page_texture = self.page_textures.get(settings.page_texture);
                 for (i, page) in book.pages.iter().enumerate() {
                     let world_rect = grid::page_rect(i, self.columns, settings.page_gap, page_size);
                     let screen_rect = self.view.to_screen_rect(world_rect);
@@ -1547,6 +1550,7 @@ impl PagethingApp {
                         margins,
                         page_size,
                         colors,
+                        page_texture,
                         highlights: &highlights,
                     };
                     page_view::paint_page(

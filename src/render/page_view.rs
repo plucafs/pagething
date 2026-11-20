@@ -6,13 +6,47 @@ use eframe::egui::{self, Align2, Color32, Mesh, Painter, Pos2, Rect, Stroke, Str
 use crate::book::paginate::{Page, PageKind};
 use crate::canvas::view::View;
 use crate::features::selection;
-use crate::persist::PageMode;
+use crate::persist::{PageMode, PageTexture};
 use crate::render::layout::{DisplayCache, LaidBlock, LaidKind, Margins, RULE_HEIGHT};
 use crate::render::theme::PageColors;
 
 pub const SEARCH_HL: Color32 = Color32::from_rgba_premultiplied(140, 112, 33, 140);
 pub const SEARCH_CURRENT_HL: Color32 = Color32::from_rgba_premultiplied(190, 70, 15, 180);
 pub const SELECTION_HL: Color32 = Color32::from_rgba_premultiplied(26, 60, 110, 110);
+const TEXTURE_TILE_WORLD_SIZE: f32 = 128.0;
+const TEXTURE_TILE_PIXELS: usize = 128;
+
+pub struct PageTextures {
+    fine_grain: egui::TextureHandle,
+    paper_fibers: egui::TextureHandle,
+    linen_weave: egui::TextureHandle,
+}
+
+impl PageTextures {
+    pub fn load(ctx: &egui::Context) -> Self {
+        let load = |name, texture| {
+            ctx.load_texture(
+                name,
+                texture_image(texture),
+                egui::TextureOptions::LINEAR_REPEAT,
+            )
+        };
+        Self {
+            fine_grain: load("page-texture-fine-grain", PageTexture::FineGrain),
+            paper_fibers: load("page-texture-paper-fibers", PageTexture::PaperFibers),
+            linen_weave: load("page-texture-linen-weave", PageTexture::LinenWeave),
+        }
+    }
+
+    pub fn get(&self, texture: PageTexture) -> Option<&egui::TextureHandle> {
+        match texture {
+            PageTexture::Plain => None,
+            PageTexture::FineGrain => Some(&self.fine_grain),
+            PageTexture::PaperFibers => Some(&self.paper_fibers),
+            PageTexture::LinenWeave => Some(&self.linen_weave),
+        }
+    }
+}
 
 /// User highlight wash: visible on light pages, muted on dark pages.
 pub fn user_hl(mode: PageMode, bg: Color32) -> Color32 {
@@ -40,6 +74,7 @@ pub struct PageView<'a> {
     pub margins: Margins,
     pub page_size: Vec2,
     pub colors: PageColors,
+    pub page_texture: Option<&'a egui::TextureHandle>,
     /// `(item index, char a, char b, color)` painted under the text.
     pub highlights: &'a [(usize, usize, usize, Color32)],
 }
@@ -53,6 +88,16 @@ pub fn paint_page(
     pv: &PageView<'_>,
 ) {
     painter.rect_filled(screen_rect, 2.0, pv.colors.bg);
+    if let Some(texture) = pv.page_texture {
+        let uv = Rect::from_min_max(
+            Pos2::ZERO,
+            egui::pos2(
+                pv.page_size.x / TEXTURE_TILE_WORLD_SIZE,
+                pv.page_size.y / TEXTURE_TILE_WORLD_SIZE,
+            ),
+        );
+        painter.image(texture.id(), screen_rect, uv, texture_tint(pv.colors.bg));
+    }
     painter.rect_stroke(
         screen_rect,
         2.0,
@@ -151,6 +196,101 @@ pub fn paint_page(
         pv.margins.bottom,
         pv.colors.page_number,
     );
+}
+
+fn texture_tint(bg: Color32) -> Color32 {
+    let luminance =
+        (f32::from(bg.r()) * 0.299 + f32::from(bg.g()) * 0.587 + f32::from(bg.b()) * 0.114) as u8;
+    if luminance > 128 {
+        Color32::from_rgba_unmultiplied(52, 42, 31, 18)
+    } else {
+        Color32::from_rgba_unmultiplied(235, 229, 211, 18)
+    }
+}
+
+fn texture_image(texture: PageTexture) -> egui::ColorImage {
+    let mut mask = vec![0_u8; TEXTURE_TILE_PIXELS * TEXTURE_TILE_PIXELS];
+    let mut seed = match texture {
+        PageTexture::Plain => 0,
+        PageTexture::FineGrain => 0x73a4_91c5,
+        PageTexture::PaperFibers => 0xb18e_2d63,
+        PageTexture::LinenWeave => 0x39d2_7f41,
+    };
+
+    match texture {
+        PageTexture::Plain => {}
+        PageTexture::FineGrain => {
+            for alpha in &mut mask {
+                if next_random(&mut seed) % 5 == 0 {
+                    *alpha = 255;
+                }
+            }
+        }
+        PageTexture::PaperFibers => {
+            for _ in 0..80 {
+                let x = (next_random(&mut seed) as usize) % TEXTURE_TILE_PIXELS;
+                let y = (next_random(&mut seed) as usize) % TEXTURE_TILE_PIXELS;
+                let length = 2 + (next_random(&mut seed) as usize % 7);
+                let dx = (next_random(&mut seed) % 5) as i32 - 2;
+                draw_fiber(&mut mask, x as i32, y as i32, dx, length as i32);
+            }
+        }
+        PageTexture::LinenWeave => {
+            for y in 0..TEXTURE_TILE_PIXELS {
+                for x in 0..TEXTURE_TILE_PIXELS {
+                    let vertical = x % 4 == 0;
+                    let horizontal = y % 4 == 0;
+                    if vertical || horizontal {
+                        let variation = (next_random(&mut seed) % 28) as u8;
+                        mask[y * TEXTURE_TILE_PIXELS + x] = 65 + variation;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut rgba = Vec::with_capacity(mask.len() * 4);
+    for alpha in mask {
+        rgba.extend_from_slice(&[255, 255, 255, alpha]);
+    }
+    egui::ColorImage::from_rgba_unmultiplied([TEXTURE_TILE_PIXELS, TEXTURE_TILE_PIXELS], &rgba)
+}
+
+fn next_random(seed: &mut u32) -> u32 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 17;
+    *seed ^= *seed << 5;
+    *seed
+}
+
+fn draw_fiber(mask: &mut [u8], x: i32, y: i32, dx: i32, dy: i32) {
+    let (mut x0, mut y0) = (x, y);
+    let (x1, y1) = (x + dx, y + dy);
+    let step_x = if x0 < x1 { 1 } else { -1 };
+    let step_y = if y0 < y1 { 1 } else { -1 };
+    let delta_x = (x1 - x0).abs();
+    let delta_y = -(y1 - y0).abs();
+    let mut error = delta_x + delta_y;
+
+    loop {
+        if (0..TEXTURE_TILE_PIXELS as i32).contains(&x0)
+            && (0..TEXTURE_TILE_PIXELS as i32).contains(&y0)
+        {
+            mask[y0 as usize * TEXTURE_TILE_PIXELS + x0 as usize] = 255;
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let twice_error = 2 * error;
+        if twice_error >= delta_y {
+            error += delta_y;
+            x0 += step_x;
+        }
+        if twice_error <= delta_x {
+            error += delta_x;
+            y0 += step_y;
+        }
+    }
 }
 
 /// Highlight rects under the text: `(item, char a, char b, color)` spans.
@@ -357,6 +497,32 @@ mod tests {
                 v.uv.y
             );
         }
+    }
+
+    #[test]
+    fn page_texture_variants_generate_distinct_repeatable_masks() {
+        let masks = [
+            texture_image(PageTexture::Plain),
+            texture_image(PageTexture::FineGrain),
+            texture_image(PageTexture::PaperFibers),
+            texture_image(PageTexture::LinenWeave),
+        ];
+
+        assert!(
+            masks
+                .iter()
+                .all(|image| { image.size == [TEXTURE_TILE_PIXELS, TEXTURE_TILE_PIXELS] })
+        );
+        assert!(masks[0].pixels.iter().all(|pixel| pixel.a() == 0));
+        for image in &masks[1..] {
+            assert!(image.pixels.iter().any(|pixel| pixel.a() > 0));
+        }
+        assert_ne!(masks[1].pixels, masks[2].pixels);
+        assert_ne!(masks[2].pixels, masks[3].pixels);
+        assert_eq!(
+            texture_image(PageTexture::FineGrain).pixels,
+            masks[1].pixels
+        );
     }
 
     #[test]
